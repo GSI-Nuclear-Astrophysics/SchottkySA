@@ -2,9 +2,7 @@
 
 ``ssa`` with no subcommand launches the GUI. ``ssa run`` is a headless
 analysis command reading named-column CSV/TSV/whitespace tables and writing
-a JSON summary plus a per-bin curve CSV. See ``ssa.pipeline.KNOWN_LIMITATIONS``
-for what it does and does not implement (e.g. no conservative covariance
-floor); those limitations are surfaced in every run's JSON output.
+a JSON summary plus a per-bin curve CSV.
 """
 
 from __future__ import annotations
