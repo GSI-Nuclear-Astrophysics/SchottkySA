@@ -143,8 +143,7 @@ If you use SchottkySA in published work, please cite it -- see `CITATION.cff`
   spectrum formats are supported by either interface.
 * The initial multi-peak centroid guess (`scipy.signal.find_peaks`-based) can
   fail on closely spaced ("contaminated") peaks unless you supply explicit
-  centroid search ranges (`mu_bounds`) -- see
-  `docs/OPEN_SCIENTIFIC_QUESTIONS.md` item 2. This is a known, documented
+  centroid search ranges (`mu_bounds`). This is a known, documented
   characteristic, not a regression.
 * Bootstrap templates do not yet inherit the nominal template's `edge_mode`
   (only relevant if you use a non-default edge mode).

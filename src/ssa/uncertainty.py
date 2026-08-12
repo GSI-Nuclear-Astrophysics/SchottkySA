@@ -8,9 +8,9 @@ of the bootstrap/template-propagation samples themselves (replicate-failure
 rate, and whether a component's combined centroid sigma rests on only one of
 the two independent sources) -- see its docstring.
 
-See ``docs/OPEN_SCIENTIFIC_QUESTIONS.md`` items 3-5 for the statistical
-conventions (covariance rescaling, quality-flag thresholds, two width
-definitions) this module documents but does not change.
+Covariance rescaling, quality-flag thresholds, and the two width
+definitions reported per component are project conventions documented in
+``docs/SCIENTIFIC_METHOD.md``, not changed by this module.
 """
 
 from __future__ import annotations
@@ -74,8 +74,9 @@ def component_widths_from_params(
     params: np.ndarray, param_names: list[str], template: PeakTemplate, n_peaks: int
 ) -> np.ndarray:
     """Component RMS widths (second-moment, scale x template std). Distinct
-    from the quantile-based sigma68 in :func:`component_quantiles_from_fit` --
-    see docs/OPEN_SCIENTIFIC_QUESTIONS.md item 5."""
+    from the quantile-based sigma68 in :func:`component_quantiles_from_fit`;
+    the two generally differ for a non-Gaussian template -- see
+    docs/SCIENTIFIC_METHOD.md section 6."""
     scales = get_scale_values_from_params(params, param_names, n_peaks)
     return scales * get_template_std(template)
 
@@ -419,8 +420,7 @@ def quality_flag_for_fit(
     sigma is not evidence the two methods agree if only one of them actually
     contributed a number.
 
-    Thresholds are this project's own convention, not a literature value --
-    see docs/OPEN_SCIENTIFIC_QUESTIONS.md item 4.
+    Thresholds are this project's own convention, not a literature value.
     """
     flags = []
     red = float(fit.get("red_chi2", np.nan))

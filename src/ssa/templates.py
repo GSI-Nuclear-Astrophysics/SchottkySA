@@ -1,10 +1,9 @@
 """Empirical peak-template construction and template-shape bootstrap.
 
 See ``docs/SCIENTIFIC_METHOD.md`` section 3 (template construction) and
-section 6 (uncertainty quantification) for the scientific rationale, and
-``docs/OPEN_SCIENTIFIC_QUESTIONS.md`` for known caveats. Numerical behaviour
-here is part of the published fitting contract; changes should be made
-deliberately and documented in those files.
+section 6 (uncertainty quantification) for the scientific rationale.
+Numerical behaviour here is part of the published fitting contract; changes
+should be made deliberately and documented there.
 """
 
 from __future__ import annotations

@@ -81,7 +81,7 @@ QUALITY_MU_NEAR_BOUND_FRACTION: float = 0.02
 # but a failure rate high enough to distrust the result. These are project
 # conventions (not derived from a formal minimum-sample-size analysis for
 # percentile estimation), chosen to be conservative for precision work; see
-# docs/SCIENTIFIC_METHOD.md section 6 and docs/OPEN_SCIENTIFIC_QUESTIONS.md.
+# docs/SCIENTIFIC_METHOD.md section 6.
 QUALITY_MIN_VALID_UNCERTAINTY_SAMPLES: int = 50
 QUALITY_MIN_UNCERTAINTY_SAMPLE_FRACTION: float = 0.5
 

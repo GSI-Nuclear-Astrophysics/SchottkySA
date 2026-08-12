@@ -2,8 +2,11 @@
 
 See ``docs/SCIENTIFIC_METHOD.md`` section 4 for the parameter-vector layout,
 initial-guess heuristic, bounds/``mu_bounds``/``min_separation`` semantics,
-and diagnostic formulas, and ``docs/OPEN_SCIENTIFIC_QUESTIONS.md`` item 2
-for a known failure mode of the unconstrained initial-guess heuristic.
+and diagnostic formulas. Without explicit ``mu_bounds``, the
+``find_peaks``-based initial-guess heuristic (:func:`guess_initial_mus`) can
+fail to resolve closely spaced ("contaminated") multi-peak regions -- supply
+explicit, ordered, non-overlapping per-component centroid search ranges via
+``mu_bounds`` for that case.
 """
 
 from __future__ import annotations

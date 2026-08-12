@@ -1,3 +1,7 @@
+---
+title: Scientific method
+---
+
 # Scientific method
 
 This document describes the algorithm SchottkySA implements: what it

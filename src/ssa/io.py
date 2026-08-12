@@ -2,8 +2,7 @@
 
 Covers NPZ key selection, the fit-history export row schema, delimited/
 JSON/XLSX/ODS writers, TSV clipboard formatting, and current-fit NPZ overlay
-export. See ``docs/OPEN_SCIENTIFIC_QUESTIONS.md`` item 6 for the rationale
-behind the current export column set.
+export.
 
 The interactive "ask the user which array is frequency/amplitude" dialog
 stays in the GUI layer (``ssa.gui.main_window``); this module raises

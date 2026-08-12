@@ -160,8 +160,11 @@ def test_two_peak_fit_with_mu_bounds(reference_template, baseline):
 
 def test_two_peak_fit_unconstrained_is_deterministic(reference_template, baseline):
     """Documents (not endorses) the optimizer's behaviour with default
-    (unbounded) initial centroid guesses on a contaminated two-peak region --
-    see docs/OPEN_SCIENTIFIC_QUESTIONS.md item 2. Preserved exactly, not fixed."""
+    (unbounded) initial centroid guesses on a contaminated two-peak region:
+    without explicit mu_bounds, one component can collapse to near-zero area
+    at a search-bound edge rather than resolving both peaks. Preserved
+    exactly, not fixed -- see test_two_peak_fit_with_mu_bounds for the
+    recommended workflow that avoids it."""
     f_two, y_two = load_xy("synthetic_two_peak_contaminated.npz", "frequency", "amplitude")
     fit2 = fit_template_region(
         f_two,
@@ -201,8 +204,8 @@ def test_two_peak_fit_no_bg_no_scale_softl1(reference_template, baseline):
 def test_uncertainty_propagation_and_pairwise_diagnostics(reference_template, baseline):
     """Reproduces the baseline's fit_two_peak_bootstrap/fit_two_peak_template_propagation
     scenario exactly: bootstrap/propagation of the UNCONSTRAINED (fit_two_peak)
-    fit -- see docs/OPEN_SCIENTIFIC_QUESTIONS.md item 2 for why its area-ratio
-    values are numerically extreme (near-zero component area), while still
+    fit, whose area-ratio values are numerically extreme (near-zero component
+    area, see test_two_peak_fit_unconstrained_is_deterministic), while still
     being an exact, deterministic reproduction of the frozen baseline."""
     f_two, y_two = load_xy("synthetic_two_peak_contaminated.npz", "frequency", "amplitude")
     fit2 = fit_template_region(
