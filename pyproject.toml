@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "SchottkySA"
+version = "0.1.0"
+description = "Empirical-template peak fitting for Schottky spectra, with a Qt GUI."
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "David Freire Fernández", email = "D.FreireFernandez@gsi.de" },
+]
+keywords = [
+    "schottky",
+    "spectroscopy",
+    "peak-fitting",
+    "template-fitting",
+    "uncertainty-quantification",
+    "physics",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13",
+]
+xlsx = [
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "odfpy>=1.4",
+]
+all = [
+    "SchottkySA[gui,xlsx]",
+]
+dev = [
+    "SchottkySA[gui,xlsx]",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pre-commit>=3.7",
+    "build>=1.2",
+    "twine>=5.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA"
+Issues = "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA/issues"
+Documentation = "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA/tree/main/docs"
+
+[project.scripts]
+ssa = "ssa.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ssa"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist: 
+include = [
+    "/src/ssa",
+    "/tests",
+    "/examples",
+    "/docs",
+    "/README.md",
+    "/LICENSE",
+    "/CITATION.cff",
+    "/CONTRIBUTING.md",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "NPY"]
+ignore = [
+    "E501",  # line length is enforced by the formatter, not lint, where it matters
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B018"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingImports = true
+
+# PySide6/pyqtgraph's type stubs are known-incomplete (Signal descriptors,
+# QAbstractItemView.selectionModel()/getRegion() optionality, etc.), which
+# produces a large volume of false-positive errors that have nothing to do
+# with SchottkySA's own correctness. The scientific core (everything outside
+# src/ssa/gui) is held to full strict-basic checking; the GUI layer relaxes
+# only the specific rule categories that are pure Qt-stub artefacts.
+[[tool.pyright.executionEnvironments]]
+root = "src/ssa/gui"
+reportOptionalMemberAccess = false
+reportAttributeAccessIssue = false
+reportCallIssue = false
+reportOperatorIssue = false
+reportArgumentType = false

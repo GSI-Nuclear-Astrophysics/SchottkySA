@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use SchottkySA in published work, please cite it as below."
+title: "SchottkySA: Empirical-template peak fitting for Schottky spectra"
+type: software
+version: 0.1.0
+date-released: "2026-08-12"
+repository-code: "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA"
+license: GPL-3.0-only
+authors:
+  - family-names: "Freire Fernández"
+    given-names: "David"
+    affiliation: "FAIR Facility for Antiproton and Ion Research GmbH, Darmstadt, Germany; GSI Helmholtzzentrum für Schwerionenforschung GmbH, Darmstadt, Germany; Institut für Kernphysik, Universität zu Köln, Köln, Germany"
+    orcid: "https://orcid.org/0000-0002-5898-9291"
+identifiers:
+  - type: doi
+    value: "todo"
+    description: "TODO."

@@ -1,0 +1,27 @@
+{
+  "reference": {
+    "mu": 1937330.0,
+    "sigma_left": 0.9,
+    "sigma_right": 1.7,
+    "amp": 100.0,
+    "noise_sigma": 0.5
+  },
+  "single_peak": {
+    "mu": 1937470.0,
+    "sigma_left": 0.9,
+    "sigma_right": 1.7,
+    "amp": 60.0,
+    "bg": 1.5,
+    "noise_sigma": 0.5
+  },
+  "two_peak": {
+    "mu1": 1937390.0,
+    "mu2": 1937397.5,
+    "sigma_left": 0.9,
+    "sigma_right": 1.7,
+    "amp1": 80.0,
+    "amp2": 40.0,
+    "bg": 2.0,
+    "noise_sigma": 0.5
+  }
+}
