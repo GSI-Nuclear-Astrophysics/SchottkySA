@@ -183,9 +183,9 @@ def pchip_tail_to_zero_one_side(
 
     info[f"{side}_tail_extra_points"] = int(n_extra)
     info[f"{side}_tail_extra_width_hz"] = actual_width
-    # Routed through trapz() (a thin wrapper) rather than calling np.trapz
-    # directly, to avoid NumPy's trapz deprecation warning; numerically
-    # identical to the composite trapezoidal rule.
+    # Routed through ssa.preprocessing.trapz() (a thin numpy.trapezoid
+    # wrapper) rather than calling numpy directly, so every integral in this
+    # module goes through one place.
     info[f"{side}_tail_area_added"] = trapz(y_extra, x_extra) if len(x_extra) > 1 else 0.0
     return x_extra, y_extra, info
 
@@ -387,6 +387,12 @@ def build_peak_template(
         if sg_window >= len(y_work):
             sg_window = make_odd(len(y_work) - 2, minimum=5)
         y_work = savgol_filter(y_work, window_length=sg_window, polyorder=min(sg_poly, sg_window - 2))
+    # Normalize to a concrete np.ndarray[float64]: savgol_filter's return type
+    # varies across scipy stub versions (e.g. scipy-stubs' more specific
+    # array-shape generics), which can otherwise fail static type-checking
+    # against apply_template_edge_handling's plain ndarray parameter. No
+    # numerical effect -- savgol_filter already returns a float64 ndarray.
+    y_work = np.asarray(y_work, dtype=float)
 
     x, y_work, edge_info = apply_template_edge_handling(
         x,

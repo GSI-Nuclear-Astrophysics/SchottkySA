@@ -12,7 +12,8 @@ title: Reproducibility
   `numpy==2.2.6`, `scipy==1.15.3`, `PySide6==6.10.2`, `pyqtgraph==0.13.7`,
   `pandas==2.3.3`, `odfpy==1.4.1`.
 * `pyproject.toml` declares `requires-python = ">=3.10"` with lower-bound
-  dependency pins (`numpy>=1.24`, `scipy>=1.10`); CI (`.github/workflows/ci.yml`)
+  dependency pins (`numpy>=2.0`, `scipy>=1.13` -- the first releases with
+  proper mutual NumPy-2.x support); CI (`.github/workflows/ci.yml`)
   additionally exercises Python 3.11, 3.12, and 3.13.
 
 ## Deterministic behaviour

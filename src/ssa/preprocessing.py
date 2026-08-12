@@ -29,11 +29,14 @@ __all__ = [
 
 
 def trapz(y: np.ndarray, x: np.ndarray) -> float:
-    """Trapezoidal integral of ``y`` over ``x`` (unit-agnostic)."""
-    try:
-        return float(np.trapezoid(y, x))
-    except AttributeError:
-        return float(np.trapz(y, x))
+    """Trapezoidal integral of ``y`` over ``x`` (unit-agnostic).
+
+    Thin wrapper around ``numpy.trapezoid`` (requires numpy>=2.0; the
+    pre-2.0 ``numpy.trapz`` name was removed from numpy's own stubs/API, so
+    this module no longer falls back to it). Numerically identical either
+    way -- both are the composite trapezoidal rule.
+    """
+    return float(np.trapezoid(y, x))
 
 
 def prepare_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
