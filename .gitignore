@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.benchmarks/
+.venv/
+venv/
+.env
+*.log
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Never commit real experimental data or generated exports.
+*.npz
+!tests/data/*.npz
+*.tsv
+*.xlsx
+*.ods
