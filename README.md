@@ -1,4 +1,4 @@
-[![10.5281/zenodo.8169341](https://doi.org/10.5281/zenodo.21906688))
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.8169341.svg)](https://doi.org/10.5281/zenodo.21906688)
 
 # SchottkySA -- Schottky Shape Analyzer
 
