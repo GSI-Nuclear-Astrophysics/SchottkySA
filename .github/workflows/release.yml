@@ -9,13 +9,22 @@ name: Release
 # Two ways to run this:
 #   - Publish a GitHub Release -> builds, re-runs the test suite, and
 #     publishes to the real PyPI index.
-#   - Run manually (workflow_dispatch) -> builds, tests, and publishes to
-#     TestPyPI only, as a dry run. Nothing reaches the real index this way.
+#   - Run manually (workflow_dispatch) -> choose either TestPyPI for a dry run
+#     or PyPI for a production upload.
 
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Package index
+        required: true
+        type: choice
+        default: testpypi
+        options:
+          - testpypi
+          - pypi
 
 concurrency:
   group: release-${{ github.ref }}
@@ -88,7 +97,7 @@ jobs:
 
   publish-to-testpypi:
     name: Publish to TestPyPI (dry run)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -110,7 +119,9 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: >-
+      (github.event_name == 'release' && github.event.action == 'published') ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     needs: build
     runs-on: ubuntu-latest
     environment:
