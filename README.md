@@ -1,10 +1,10 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.8169341.svg)](https://doi.org/10.5281/zenodo.21906688)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.8169341.svg)](https://doi.org/10.5281/zenodo.21906688)]
 
 # SchottkySA -- Schottky Shape Analyzer
 
 Empirical-template peak fitting and uncertainty analysis for Schottky spectra, with a Qt GUI.
 
-> **Status:** Release v1.0.0. pip install SchottkySA.
+> **Status:** Release v1.0.0.
 
 ## What this is
 
