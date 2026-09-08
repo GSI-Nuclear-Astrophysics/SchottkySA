@@ -4,9 +4,7 @@
 
 Empirical-template peak fitting and uncertainty analysis for Schottky spectra, with a Qt GUI.
 
-> **Status:** pre-release. Not yet published to PyPI. See
-> `docs/SCIENTIFIC_METHOD.md` for the exact scientific behaviour this
-> package implements.
+> **Status:** Release v1.0.0. pip install SchottkySA.
 
 ## What this is
 
@@ -22,7 +20,7 @@ core is also importable as a plain Python API (no GUI dependency required).
 
 ## Installation
 
-### From source (current -- no PyPI release yet)
+### From source
 
 ```bash
 git clone <this-repository>
@@ -32,10 +30,10 @@ python -m pip install -e ".[gui]"      # scientific core + Qt GUI
 python -m pip install -e ".[all]"
 ```
 
-### From PyPI (once released)
+### From PyPI 
 
 ```bash
-pip install "SchottkySA[gui]"
+pip install SchottkySA
 ```
 
 Requires Python >= 3.10.
