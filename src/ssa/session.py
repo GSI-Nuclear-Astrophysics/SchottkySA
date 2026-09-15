@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ else:
 import tomli_w
 
 from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
+from ssa.io import make_export_rows_for_result, select_frequency_range
+from ssa.pipeline import build_template_bank, run_fit_with_uncertainty
+from ssa.preprocessing import prepare_xy
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -33,6 +37,8 @@ __all__ = [
     "Session",
     "save_session",
     "load_session",
+    "ReplayReport",
+    "replay_session",
 ]
 
 SCHEMA_VERSION = 1
@@ -227,3 +233,148 @@ def load_session(path: str | Path) -> Session:
         templates=[_template_record_from_dict(t) for t in d.get("templates", [])],
         fits=[_fit_record_from_dict(f) for f in d.get("fits", [])],
     )
+
+
+RTOL = 1e-3
+ATOL = 1e-6
+
+
+@dataclass
+class ReplayReport:
+    input_warnings: list[str]
+    templates: list[dict[str, Any]]
+    fits: list[dict[str, Any]]
+    mismatches: list[str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.mismatches
+
+
+def _values_close(a: float, b: float) -> bool:
+    if math.isnan(a) and math.isnan(b):
+        return True
+    return math.isclose(a, b, rel_tol=RTOL, abs_tol=ATOL)
+
+
+def _diff_scalars(label: str, expected: dict[str, Any], actual: dict[str, Any]) -> list[str]:
+    out = []
+    for key, exp_val in expected.items():
+        if key not in actual:
+            out.append(f"{label}: missing field '{key}' on replay")
+            continue
+        act_val = actual[key]
+        if isinstance(exp_val, bool) or isinstance(act_val, bool):
+            if exp_val != act_val:
+                out.append(f"{label}: '{key}' expected {exp_val!r}, got {act_val!r}")
+        elif isinstance(exp_val, (int, float)) and isinstance(act_val, (int, float)):
+            if not _values_close(float(exp_val), float(act_val)):
+                out.append(f"{label}: '{key}' expected {exp_val!r}, got {act_val!r}")
+        elif exp_val != act_val:
+            out.append(f"{label}: '{key}' expected {exp_val!r}, got {act_val!r}")
+    return out
+
+
+def _diff_rows(label: str, expected_rows: list[dict[str, Any]], actual_rows: list[dict[str, Any]]) -> list[str]:
+    if len(expected_rows) != len(actual_rows):
+        return [f"{label}: expected {len(expected_rows)} component rows, got {len(actual_rows)}"]
+    out = []
+    for k, (exp_row, act_row) in enumerate(zip(expected_rows, actual_rows, strict=True)):
+        out.extend(_diff_scalars(f"{label} component {k}", exp_row, act_row))
+    return out
+
+
+def _template_verify_values(bank: dict[str, Any]) -> dict[str, float]:
+    tpl = bank["template_nominal"]
+    q16, q50, q84 = tpl.quantile([0.16, 0.50, 0.84])
+    return {
+        "raw_area": float(tpl.raw_area),
+        "raw_cog": float(tpl.raw_cog),
+        "raw_std": float(tpl.raw_std),
+        "q16": float(q16),
+        "q50": float(q50),
+        "q84": float(q84),
+        "n_template_bank": len(bank["templates"]),
+    }
+
+
+def _load_input_xy(path: str | Path, frequency_key: str, amplitude_key: str) -> tuple[np.ndarray, np.ndarray]:
+    data = np.load(path)
+    f = np.asarray(data[frequency_key], dtype=float).ravel()
+    y = np.asarray(data[amplitude_key], dtype=float).ravel()
+    return prepare_xy(f, y)
+
+
+def replay_session(
+    session: Session,
+    *,
+    data_path_override: str | Path | None = None,
+    progress_cb: Callable[[str], None] | None = None,
+) -> ReplayReport:
+    def progress(msg: str) -> None:
+        if progress_cb is not None:
+            progress_cb(msg)
+
+    warnings: list[str] = []
+    mismatches: list[str] = []
+
+    data_path = Path(data_path_override) if data_path_override is not None else Path(session.input.path)
+    progress(f"Loading {data_path}...")
+    actual_sha = _sha256_of(data_path)
+    if actual_sha != session.input.sha256:
+        warnings.append(
+            f"Input file hash mismatch: recorded {session.input.sha256}, found {actual_sha} at {data_path}."
+        )
+    f, y = _load_input_xy(data_path, session.input.frequency_key, session.input.amplitude_key)
+
+    templates: list[dict[str, Any]] = []
+    bank_by_id: dict[int, dict[str, Any]] = {}
+    for record in session.templates:
+        progress(f"Rebuilding template {record.id}...")
+        x_r, y_r, _ = select_frequency_range(f, y, None, record.region_hz[0], record.region_hz[1])
+        bank = build_template_bank(x_r, y_r, record.config)
+        tpl = bank["template_nominal"]
+        mismatches.extend(_diff_scalars(f"template {record.id}", record.verify, _template_verify_values(bank)))
+        entry = {
+            "name": tpl.name,
+            "region_lo": record.region_hz[0],
+            "region_hi": record.region_hz[1],
+            "template": tpl,
+            "template_bank": bank["templates"],
+            "config": record.config,
+            "summary": bank.get("summary", {}),
+            "settings": {
+                "smooth_nominal_template": record.config.smooth,
+                "resample_factor": record.config.resample_factor,
+            },
+            "edge_info": getattr(tpl, "edge_info", {}),
+            "residual_model": bank.get("residual_model", {}),
+            "full": bank,
+        }
+        templates.append(entry)
+        bank_by_id[record.id] = entry
+
+    fits: list[dict[str, Any]] = []
+    for record in session.fits:
+        progress(f"Refitting '{record.label}'...")
+        tpl_entry = bank_by_id[record.template_id]
+        x_r, y_r, _ = select_frequency_range(f, y, None, record.region_hz[0], record.region_hz[1])
+        result = run_fit_with_uncertainty(
+            x_r, y_r, tpl_entry["template"], tpl_entry["template_bank"], record.fit_config, record.uncertainty_config
+        )
+        rows = make_export_rows_for_result(result, label=record.label, template_registry=templates, notes=record.notes)
+        mismatches.extend(_diff_rows(record.label, record.verify_rows, rows))
+        fits.append(
+            {
+                "label": record.label,
+                "notes": record.notes,
+                "result": result,
+                "rows": rows,
+                "fit_config": record.fit_config,
+                "uncertainty_config": record.uncertainty_config,
+                "template_index": record.template_id,
+                "region_hz": record.region_hz,
+            }
+        )
+
+    return ReplayReport(input_warnings=warnings, templates=templates, fits=fits, mismatches=mismatches)
