@@ -75,6 +75,7 @@ def test_store_current_fit_records_fit_and_uncertainty_config(main_window):
     main_window.worker.wait()
     QtWidgets.QApplication.processEvents()
 
+    # avoid double-storing: finish_fit_region auto-stores when this is checked (the default)
     main_window.auto_store_check.setChecked(False)
     main_window.start_fit_region()
     main_window.worker.wait()
@@ -105,6 +106,7 @@ def test_session_from_state_round_trips_through_save_and_load(main_window, tmp_p
     main_window.worker.wait()
     QtWidgets.QApplication.processEvents()
 
+    # avoid double-storing: finish_fit_region auto-stores when this is checked (the default)
     main_window.auto_store_check.setChecked(False)
     main_window.start_fit_region()
     main_window.worker.wait()

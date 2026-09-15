@@ -224,27 +224,34 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def _replay_command(args: argparse.Namespace) -> int:
-    session = load_session(args.session)
-    report = replay_session(
-        session,
-        data_path_override=args.data,
-        progress_cb=lambda msg: print(msg, file=sys.stderr),
-    )
-    for warning in report.input_warnings:
-        print(f"WARNING: {warning}", file=sys.stderr)
-    for template in session.templates:
-        status = "ok" if not any(f"template {template.id}:" in m for m in report.mismatches) else "MISMATCH"
-        print(f"template {template.id}: {status}", file=sys.stderr)
-    for fit in session.fits:
-        status = "ok" if not any(m.startswith(fit.label) for m in report.mismatches) else "MISMATCH"
-        print(f"fit '{fit.label}': {status}", file=sys.stderr)
-    for mismatch in report.mismatches:
-        print(f"  {mismatch}", file=sys.stderr)
-    if report.ok:
-        print(f"All {len(session.templates)} template(s) and {len(session.fits)} fit(s) reproduced.", file=sys.stderr)
-        return 0
-    print(f"{len(report.mismatches)} mismatch(es) found.", file=sys.stderr)
-    return 1
+    try:
+        session = load_session(args.session)
+        report = replay_session(
+            session,
+            data_path_override=args.data,
+            progress_cb=lambda msg: print(msg, file=sys.stderr),
+        )
+        for warning in report.input_warnings:
+            print(f"WARNING: {warning}", file=sys.stderr)
+        for template in session.templates:
+            status = "ok" if not any(f"template {template.id}:" in m for m in report.mismatches) else "MISMATCH"
+            print(f"template {template.id}: {status}", file=sys.stderr)
+        for fit in session.fits:
+            status = "ok" if not any(m.startswith(f"{fit.label} component ") for m in report.mismatches) else "MISMATCH"
+            print(f"fit '{fit.label}': {status}", file=sys.stderr)
+        for mismatch in report.mismatches:
+            print(f"  {mismatch}", file=sys.stderr)
+        if report.ok:
+            print(
+                f"All {len(session.templates)} template(s) and {len(session.fits)} fit(s) reproduced.",
+                file=sys.stderr,
+            )
+            return 0
+        print(f"{len(report.mismatches)} mismatch(es) found.", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"ssa replay failed: {exc}", file=sys.stderr)
+        return 1
 
 
 def _launch_gui() -> int:

@@ -19,6 +19,7 @@ from ssa.io import export_current_overlay_npz as _export_current_overlay_npz
 from ssa.io import export_history_rows, make_export_rows_for_result, rows_to_tsv, select_npz_keys
 from ssa.preprocessing import prepare_xy
 from ssa.session import (
+    SCHEMA_VERSION,
     FitRecord,
     FormState,
     InputRef,
@@ -956,6 +957,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             for idx, entry in enumerate(self.templates)
         ]
+        for rec in self.fit_records:
+            if rec["fit_config"] is None or rec["uncertainty_config"] is None:
+                raise ValueError(f"Fit '{rec['label']}' has no recorded fit configuration; cannot save session.")
         fits = [
             FitRecord(
                 label=rec["label"],
@@ -969,7 +973,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for rec in self.fit_records
         ]
         return Session(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             ssa_version=SSA_VERSION,
             created_utc=datetime.now(timezone.utc).isoformat(),
             input=InputRef(
@@ -1030,6 +1034,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_replay_report(report, self._loading_session)
 
     def _apply_replay_report(self, report: ReplayReport, session: Session) -> None:
+        self.frequency = report.frequency
+        self.amplitude = report.amplitude
+        self.current_file = report.data_path
+        self._frequency_key = session.input.frequency_key
+        self._amplitude_key = session.input.amplitude_key
+        self.file_label.setText(
+            f"{report.data_path.name}\n"
+            f"frequency: {self._frequency_key}, amplitude: {self._amplitude_key}\n"
+            f"N={len(self.frequency):,}"
+        )
+        self.data_curve.setData(self.frequency, self.amplitude)
+        self.plot.setXRange(float(self.frequency.min()), float(self.frequency.max()), padding=0.02)
+        self.plot.setYRange(float(np.nanmin(self.amplitude)), float(np.nanmax(self.amplitude)), padding=0.05)
+
         self.templates = report.templates
         self.template_combo.clear()
         for idx, entry in enumerate(self.templates):
@@ -1041,8 +1059,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_history_table()
         self.clear_fit_overlay()
         if self.fit_records:
-            last_result = self.fit_records[-1]["result"]
+            last_record = self.fit_records[-1]
+            last_result = last_record["result"]
             self.last_result = last_result
+            self.last_fit_config = last_record["fit_config"]
+            self.last_uncertainty_config = last_record["uncertainty_config"]
+            self.last_template_index = last_record["template_index"]
+            self.last_region_hz = last_record["region_hz"]
             self.plot_fit_overlay(last_result["fit"])
 
         fs = session.form_state
@@ -1296,6 +1319,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.export_history_btn,
             self.export_overlay_btn,
             self.delete_selected_btn,
+            self.save_session_action,
+            self.load_session_action,
         ]:
             w.setEnabled(not busy)
         self.status(message or ("Busy..." if busy else "Ready"))

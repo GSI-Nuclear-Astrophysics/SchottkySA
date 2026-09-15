@@ -168,7 +168,7 @@ def _fit_config_from_dict(d: dict[str, Any]) -> FitConfig:
     return FitConfig(
         n_peaks=d["n_peaks"],
         init_mus=d.get("init_mus"),
-        mu_bounds=[tuple(b) for b in mu_bounds] if mu_bounds else None,
+        mu_bounds=[tuple(b) for b in mu_bounds] if mu_bounds is not None else None,
         background_order=d["background_order"],
         allow_scale=d["allow_scale"],
         common_scale=d["common_scale"],
@@ -224,6 +224,11 @@ def _fit_record_from_dict(d: dict[str, Any]) -> FitRecord:
 def load_session(path: str | Path) -> Session:
     with open(path, "rb") as f:
         d = tomllib.load(f)
+    if d["schema_version"] != SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported session schema_version {d['schema_version']}; "
+            f"this version of SchottkySA supports schema_version {SCHEMA_VERSION}."
+        )
     return Session(
         schema_version=d["schema_version"],
         ssa_version=d["ssa_version"],
@@ -245,6 +250,9 @@ class ReplayReport:
     templates: list[dict[str, Any]]
     fits: list[dict[str, Any]]
     mismatches: list[str]
+    frequency: np.ndarray
+    amplitude: np.ndarray
+    data_path: Path
 
     @property
     def ok(self) -> bool:
@@ -357,7 +365,12 @@ def replay_session(
     fits: list[dict[str, Any]] = []
     for record in session.fits:
         progress(f"Refitting '{record.label}'...")
-        tpl_entry = bank_by_id[record.template_id]
+        tpl_entry = bank_by_id.get(record.template_id)
+        if tpl_entry is None:
+            raise ValueError(
+                f"Fit '{record.label}' references template_id {record.template_id}, "
+                "which is not among this session's templates."
+            )
         x_r, y_r, _ = select_frequency_range(f, y, None, record.region_hz[0], record.region_hz[1])
         result = run_fit_with_uncertainty(
             x_r, y_r, tpl_entry["template"], tpl_entry["template_bank"], record.fit_config, record.uncertainty_config
@@ -377,4 +390,12 @@ def replay_session(
             }
         )
 
-    return ReplayReport(input_warnings=warnings, templates=templates, fits=fits, mismatches=mismatches)
+    return ReplayReport(
+        input_warnings=warnings,
+        templates=templates,
+        fits=fits,
+        mismatches=mismatches,
+        frequency=f,
+        amplitude=y,
+        data_path=data_path,
+    )
