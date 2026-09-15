@@ -36,6 +36,8 @@ classifiers = [
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
+    "tomli-w>=1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
