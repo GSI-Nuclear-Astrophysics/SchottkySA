@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +11,24 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from ssa import __version__ as SSA_VERSION
 from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
 from ssa.constants import EDGE_MODES, LOSS_CHOICES
 from ssa.gui.workers import AnalysisWorker
 from ssa.io import export_current_overlay_npz as _export_current_overlay_npz
 from ssa.io import export_history_rows, make_export_rows_for_result, rows_to_tsv, select_npz_keys
 from ssa.preprocessing import prepare_xy
+from ssa.session import (
+    FitRecord,
+    FormState,
+    InputRef,
+    Session,
+    TemplateRecord,
+    _sha256_of,
+)
+from ssa.session import (
+    save_session as _save_session,
+)
 from ssa.templates import get_template_std
 from ssa.uncertainty import (
     combined_sigma,
@@ -31,6 +44,20 @@ from ssa.uncertainty import (
 __all__ = ["MainWindow"]
 
 
+def _template_verify_from_entry(entry: dict[str, Any]) -> dict[str, float]:
+    tpl = entry["template"]
+    q16, q50, q84 = tpl.quantile([0.16, 0.50, 0.84])
+    return {
+        "raw_area": float(tpl.raw_area),
+        "raw_cog": float(tpl.raw_cog),
+        "raw_std": float(tpl.raw_std),
+        "q16": float(q16),
+        "q50": float(q50),
+        "q84": float(q84),
+        "n_template_bank": len(entry["template_bank"]),
+    }
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -40,6 +67,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frequency: np.ndarray | None = None
         self.amplitude: np.ndarray | None = None
         self.current_file: Path | None = None
+        self._frequency_key: str = ""
+        self._amplitude_key: str = ""
         self.templates: list[dict[str, Any]] = []
         self.fit_records: list[dict[str, Any]] = []
         self.last_result: dict[str, Any] | None = None
@@ -60,6 +89,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
+
+        file_menu = self.menuBar().addMenu("&File")
+        self.save_session_action = file_menu.addAction("Save Session...")
+        self.load_session_action = file_menu.addAction("Load Session...")
+
         layout = QtWidgets.QHBoxLayout(central)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -361,6 +395,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def _connect_signals(self) -> None:
+        self.save_session_action.triggered.connect(self.save_session)
+        self.load_session_action.triggered.connect(self.load_session)
         self.load_btn.clicked.connect(self.load_npz)
         self.build_template_btn.clicked.connect(self.start_build_template)
         self.fit_btn.clicked.connect(self.start_fit_region)
@@ -400,6 +436,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.frequency = f
             self.amplitude = y
             self.current_file = Path(path)
+            self._frequency_key = f_key
+            self._amplitude_key = y_key
             self.file_label.setText(f"{Path(path).name}\nfrequency: {f_key}, amplitude: {y_key}\nN={len(f):,}")
             self.data_curve.setData(f, y)
             self.plot.setXRange(float(f.min()), float(f.max()), padding=0.02)
@@ -886,6 +924,79 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_history_table(select_last=True)
         self.tabs.setCurrentIndex(1)
         self.status(f"Stored fit as '{label}'.")
+
+    def _current_form_state(self) -> FormState:
+        n_peaks = int(self.n_peaks_spin.value())
+        init_mus = self.parse_init_mus()
+        mu_bounds = self.parse_mu_bounds_for_fit(n_peaks=n_peaks, init_mus=init_mus)
+        return FormState(
+            template=self._template_config_from_widgets(),
+            fit=self._fit_config_from_widgets(n_peaks, init_mus, mu_bounds),
+            fit_label=self.fit_label_edit.text().strip() or self.next_default_fit_label(),
+            auto_store=bool(self.auto_store_check.isChecked()),
+            uncertainty=self._uncertainty_config_from_widgets(),
+            region_hz=self.selected_region_bounds(),
+        )
+
+    def _session_from_state(self) -> Session:
+        if self.current_file is None:
+            raise ValueError("No data file loaded.")
+        sha256 = _sha256_of(self.current_file)
+        templates = [
+            TemplateRecord(
+                id=idx,
+                region_hz=(entry["region_lo"], entry["region_hi"]),
+                config=entry["config"],
+                verify=_template_verify_from_entry(entry),
+            )
+            for idx, entry in enumerate(self.templates)
+        ]
+        fits = [
+            FitRecord(
+                label=rec["label"],
+                notes=rec["notes"],
+                template_id=rec["template_index"],
+                region_hz=rec["region_hz"],
+                fit_config=rec["fit_config"],
+                uncertainty_config=rec["uncertainty_config"],
+                verify_rows=rec["rows"],
+            )
+            for rec in self.fit_records
+        ]
+        return Session(
+            schema_version=1,
+            ssa_version=SSA_VERSION,
+            created_utc=datetime.now(timezone.utc).isoformat(),
+            input=InputRef(
+                path=str(self.current_file),
+                sha256=sha256,
+                frequency_key=self._frequency_key,
+                amplitude_key=self._amplitude_key,
+            ),
+            form_state=self._current_form_state(),
+            templates=templates,
+            fits=fits,
+        )
+
+    def save_session(self) -> None:
+        try:
+            session = self._session_from_state()
+        except Exception as exc:
+            self.show_error(str(exc))
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save session", "session.toml", "TOML (*.toml)")
+        if not path:
+            return
+        if not path.lower().endswith(".toml"):
+            path += ".toml"
+        try:
+            _save_session(path, session)
+            self.status(f"Saved session to {path}")
+        except Exception as exc:
+            self.show_error(f"Save failed:\n{exc}")
+
+    def load_session(self) -> None:
+        raise NotImplementedError
 
     def refresh_history_table(self, select_last: bool = False) -> None:
         self._updating_history_table = True
