@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
 from ssa.constants import EDGE_MODES, LOSS_CHOICES
 from ssa.gui.workers import AnalysisWorker
 from ssa.io import export_current_overlay_npz as _export_current_overlay_npz
@@ -41,6 +43,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.templates: list[dict[str, Any]] = []
         self.fit_records: list[dict[str, Any]] = []
         self.last_result: dict[str, Any] | None = None
+        self.last_fit_config: FitConfig | None = None
+        self.last_uncertainty_config: UncertaintyConfig | None = None
+        self.last_template_index: int = -1
+        self.last_region_hz: tuple[float, float] = (0.0, 0.0)
         self.worker: AnalysisWorker | None = None
         self._updating_history_table = False
 
@@ -455,29 +461,54 @@ class MainWindow(QtWidgets.QMainWindow):
             return "auto"
         return max(1, int(float(txt)))
 
+    def _template_config_from_widgets(self) -> TemplateBuildConfig:
+        sg_win = self.sg_window_spin.value()
+        return TemplateBuildConfig(
+            name=self.template_name_edit.text().strip() or f"template_{len(self.templates) + 1}",
+            n_template_boot=int(self.template_boot_spin.value()),
+            block_size=self.parse_block_size(),
+            random_seed=int(self.seed_spin.value()),
+            clip_negative=bool(self.clip_check.isChecked()),
+            smooth=bool(self.smooth_check.isChecked()),
+            sg_window=None if sg_win == 0 else int(sg_win),
+            resample_factor=int(self.resample_spin.value()),
+            edge_mode=self.edge_mode_combo.currentText(),
+            edge_width_hz=float(self.edge_width_spin.value()),
+            edge_fraction=float(self.edge_fraction_spin.value()),
+        )
+
+    def _fit_config_from_widgets(
+        self, n_peaks: int, init_mus: list[float] | None, mu_bounds: list[tuple[float, float]] | None
+    ) -> FitConfig:
+        return FitConfig(
+            n_peaks=n_peaks,
+            init_mus=init_mus,
+            mu_bounds=mu_bounds,
+            background_order=int(self.background_order_spin.value()),
+            allow_scale=bool(self.allow_scale_check.isChecked()),
+            common_scale=bool(self.common_scale_check.isChecked()),
+            loss=self.loss_combo.currentText(),
+            min_separation=float(self.min_sep_spin.value()),
+        )
+
+    def _uncertainty_config_from_widgets(self) -> UncertaintyConfig:
+        return UncertaintyConfig(
+            block_size=self.parse_block_size(),
+            random_seed=int(self.seed_spin.value()),
+            run_bootstrap=bool(self.run_boot_check.isChecked()),
+            n_boot=int(self.n_boot_spin.value()),
+            run_template_propagation=bool(self.run_tpl_prop_check.isChecked()),
+            n_template_prop=int(self.tpl_prop_spin.value()),
+        )
+
     # ----------------------------- Template actions ---------------------------
 
     def start_build_template(self) -> None:
         try:
             x, y = self.selected_region_xy()
-            sg_win = self.sg_window_spin.value()
-            sg_window = None if sg_win == 0 else int(sg_win)
-            payload = {
-                "x": x,
-                "y": y,
-                "name": self.template_name_edit.text().strip() or f"template_{len(self.templates) + 1}",
-                "n_template_boot": int(self.template_boot_spin.value()),
-                "block_size": self.parse_block_size(),
-                "random_seed": int(self.seed_spin.value()),
-                "clip_negative": bool(self.clip_check.isChecked()),
-                "smooth": bool(self.smooth_check.isChecked()),
-                "sg_window": sg_window,
-                "sg_poly": 3,
-                "resample_factor": int(self.resample_spin.value()),
-                "edge_mode": self.edge_mode_combo.currentText(),
-                "edge_width_hz": float(self.edge_width_spin.value()),
-                "edge_fraction": float(self.edge_fraction_spin.value()),
-            }
+            config = self._template_config_from_widgets()
+            payload = {"x": x, "y": y, **asdict(config)}
+            self._pending_template_config = config
             self.set_busy(True, "Building template...")
             self.worker = AnalysisWorker("build_template", payload)
             self.worker.progress.connect(self.status)
@@ -493,6 +524,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lo, hi = self.selected_region_bounds()
         entry = {
             "name": tpl.name,
+            "config": self._pending_template_config,
             "region_lo": lo,
             "region_hi": hi,
             "template": tpl,
@@ -621,26 +653,20 @@ class MainWindow(QtWidgets.QMainWindow):
             n_peaks = int(self.n_peaks_spin.value())
             init_mus = self.parse_init_mus()
             mu_bounds = self.parse_mu_bounds_for_fit(n_peaks=n_peaks, init_mus=init_mus)
+            fit_config = self._fit_config_from_widgets(n_peaks, init_mus, mu_bounds)
+            unc_config = self._uncertainty_config_from_widgets()
             payload = {
                 "x": x,
                 "y": y,
                 "template": tpl_entry["template"],
                 "template_bank": tpl_entry["template_bank"],
-                "n_peaks": n_peaks,
-                "init_mus": init_mus,
-                "mu_bounds": mu_bounds,
-                "background_order": int(self.background_order_spin.value()),
-                "allow_scale": bool(self.allow_scale_check.isChecked()),
-                "common_scale": bool(self.common_scale_check.isChecked()),
-                "loss": self.loss_combo.currentText(),
-                "block_size": self.parse_block_size(),
-                "random_seed": int(self.seed_spin.value()),
-                "run_bootstrap": bool(self.run_boot_check.isChecked()),
-                "n_boot": int(self.n_boot_spin.value()),
-                "run_template_propagation": bool(self.run_tpl_prop_check.isChecked()),
-                "n_template_prop": int(self.tpl_prop_spin.value()),
-                "min_separation": float(self.min_sep_spin.value()),
+                **asdict(fit_config),
+                **asdict(unc_config),
             }
+            self._pending_fit_config = fit_config
+            self._pending_uncertainty_config = unc_config
+            self._pending_template_index = self.template_combo.currentIndex()
+            self._pending_region_hz = self.selected_region_bounds()
             self.set_busy(True, "Fitting selected region...")
             self.worker = AnalysisWorker("fit_region", payload)
             self.worker.progress.connect(self.status)
@@ -653,6 +679,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def finish_fit_region(self, result: dict[str, Any]) -> None:
         self.set_busy(False, "Fit finished.")
         self.last_result = result
+        self.last_fit_config = self._pending_fit_config
+        self.last_uncertainty_config = self._pending_uncertainty_config
+        self.last_template_index = self._pending_template_index
+        self.last_region_hz = self._pending_region_hz
         self.plot_fit_overlay(result["fit"])
         self.fill_results_table(result)
         self.fill_fit_summary(result)
@@ -847,6 +877,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": notes,
             "result": self.last_result,
             "rows": rows,
+            "fit_config": self.last_fit_config,
+            "uncertainty_config": self.last_uncertainty_config,
+            "template_index": self.last_template_index,
+            "region_hz": self.last_region_hz,
         }
         self.fit_records.append(record)
         self.refresh_history_table(select_last=True)
