@@ -19,6 +19,7 @@ from ssa.constants import EDGE_MODES, LOSS_CHOICES
 from ssa.exceptions import InputFormatError, SSAError
 from ssa.io import load_table, select_frequency_range, write_curve_csv
 from ssa.pipeline import build_run_summary, build_template_bank, run_fit_with_uncertainty
+from ssa.session import load_session, replay_session
 
 
 def _parse_range(text: str | None) -> tuple[float | None, float | None]:
@@ -116,6 +117,20 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--out-json", type=Path, default=None, help="Default: <out-dir>/<label>_ssa_summary.json")
     run_parser.add_argument("--out-csv", type=Path, default=None, help="Default: <out-dir>/<label>_ssa_curve.csv")
 
+    replay_parser = subparsers.add_parser(
+        "replay",
+        help="Recompute a saved session from its TOML file and verify the numbers reproduce.",
+        description=(
+            "Load a session saved by the GUI (or ssa.session), rerun every saved template build and "
+            "fit from its recorded parameters, and compare the result against the values recorded "
+            "when it was saved. Exits 0 if everything reproduces within tolerance, 1 otherwise."
+        ),
+    )
+    replay_parser.add_argument("session", type=Path, help="Session TOML file.")
+    replay_parser.add_argument(
+        "--data", type=Path, default=None, help="Override the input NPZ path recorded in the session."
+    )
+
     return parser
 
 
@@ -208,6 +223,30 @@ def _run_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def _replay_command(args: argparse.Namespace) -> int:
+    session = load_session(args.session)
+    report = replay_session(
+        session,
+        data_path_override=args.data,
+        progress_cb=lambda msg: print(msg, file=sys.stderr),
+    )
+    for warning in report.input_warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    for template in session.templates:
+        status = "ok" if not any(f"template {template.id}:" in m for m in report.mismatches) else "MISMATCH"
+        print(f"template {template.id}: {status}", file=sys.stderr)
+    for fit in session.fits:
+        status = "ok" if not any(m.startswith(fit.label) for m in report.mismatches) else "MISMATCH"
+        print(f"fit '{fit.label}': {status}", file=sys.stderr)
+    for mismatch in report.mismatches:
+        print(f"  {mismatch}", file=sys.stderr)
+    if report.ok:
+        print(f"All {len(session.templates)} template(s) and {len(session.fits)} fit(s) reproduced.", file=sys.stderr)
+        return 0
+    print(f"{len(report.mismatches)} mismatch(es) found.", file=sys.stderr)
+    return 1
+
+
 def _launch_gui() -> int:
     try:
         from ssa.gui.main_window import MainWindow
@@ -234,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run_command(args)
+    if args.command == "replay":
+        return _replay_command(args)
     return _launch_gui()
 
 
