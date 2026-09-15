@@ -9,10 +9,11 @@ import numpy as np
 from pyqtgraph.Qt import QtCore
 
 from ssa.fitting import fit_template_region, mu_bounds_to_string
+from ssa.session import ReplayReport, Session, replay_session
 from ssa.templates import bootstrap_template_bank
 from ssa.uncertainty import bootstrap_fit, propagate_template_uncertainty_to_target_fit
 
-__all__ = ["AnalysisWorker"]
+__all__ = ["AnalysisWorker", "SessionReplayWorker"]
 
 
 class AnalysisWorker(QtCore.QThread):
@@ -121,3 +122,25 @@ class AnalysisWorker(QtCore.QThread):
             },
         }
         self.finished_ok.emit(result)
+
+
+class SessionReplayWorker(QtCore.QThread):
+    progress = QtCore.Signal(str)
+    finished_ok = QtCore.Signal(object)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, session: Session, data_path_override: str | None = None):
+        super().__init__()
+        self.session = session
+        self.data_path_override = data_path_override
+
+    def run(self) -> None:
+        try:
+            report: ReplayReport = replay_session(
+                self.session,
+                data_path_override=self.data_path_override,
+                progress_cb=self.progress.emit,
+            )
+            self.finished_ok.emit(report)
+        except Exception:
+            self.failed.emit(traceback.format_exc())

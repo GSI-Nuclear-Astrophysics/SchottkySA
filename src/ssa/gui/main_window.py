@@ -14,7 +14,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from ssa import __version__ as SSA_VERSION
 from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
 from ssa.constants import EDGE_MODES, LOSS_CHOICES
-from ssa.gui.workers import AnalysisWorker
+from ssa.gui.workers import AnalysisWorker, SessionReplayWorker
 from ssa.io import export_current_overlay_npz as _export_current_overlay_npz
 from ssa.io import export_history_rows, make_export_rows_for_result, rows_to_tsv, select_npz_keys
 from ssa.preprocessing import prepare_xy
@@ -22,9 +22,13 @@ from ssa.session import (
     FitRecord,
     FormState,
     InputRef,
+    ReplayReport,
     Session,
     TemplateRecord,
     _sha256_of,
+)
+from ssa.session import (
+    load_session as _load_session,
 )
 from ssa.session import (
     save_session as _save_session,
@@ -78,6 +82,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_region_hz: tuple[float, float] = (0.0, 0.0)
         self.worker: AnalysisWorker | None = None
         self._updating_history_table = False
+        self._loading_session: Session | None = None
 
         pg.setConfigOptions(antialias=False)
 
@@ -996,7 +1001,98 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_error(f"Save failed:\n{exc}")
 
     def load_session(self) -> None:
-        raise NotImplementedError
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load session", "", "TOML (*.toml);;All files (*)")
+        if not path:
+            return
+        if self.templates or self.fit_records:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Load session",
+                "Loading a session replaces the current templates and stored fits. Continue?",
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        try:
+            session = _load_session(path)
+        except Exception as exc:
+            self.show_error(f"Could not read session file:\n{exc}")
+            return
+        self.set_busy(True, "Replaying session...")
+        self._loading_session = session
+        self.worker = SessionReplayWorker(session)
+        self.worker.progress.connect(self.status)
+        self.worker.finished_ok.connect(self._finish_load_session)
+        self.worker.failed.connect(self.worker_failed)
+        self.worker.start()
+
+    def _finish_load_session(self, report: ReplayReport) -> None:
+        self.set_busy(False, "Session loaded.")
+        self._apply_replay_report(report, self._loading_session)
+
+    def _apply_replay_report(self, report: ReplayReport, session: Session) -> None:
+        self.templates = report.templates
+        self.template_combo.clear()
+        for idx, entry in enumerate(self.templates):
+            self.template_combo.addItem(f"{idx + 1}: {entry['name']} ({len(entry['template_bank'])} boot)")
+        if self.templates:
+            self.template_combo.setCurrentIndex(len(self.templates) - 1)
+
+        self.fit_records = report.fits
+        self.refresh_history_table()
+        self.clear_fit_overlay()
+        if self.fit_records:
+            last_result = self.fit_records[-1]["result"]
+            self.last_result = last_result
+            self.plot_fit_overlay(last_result["fit"])
+
+        fs = session.form_state
+        self.template_name_edit.setText(fs.template.name)
+        self.template_boot_spin.setValue(fs.template.n_template_boot)
+        self.resample_spin.setValue(fs.template.resample_factor)
+        self.smooth_check.setChecked(fs.template.smooth)
+        self.clip_check.setChecked(fs.template.clip_negative)
+        self.sg_window_spin.setValue(fs.template.sg_window or 0)
+        self.edge_mode_combo.setCurrentText(fs.template.edge_mode)
+        self.edge_width_spin.setValue(fs.template.edge_width_hz)
+        self.edge_fraction_spin.setValue(fs.template.edge_fraction)
+
+        self.fit_label_edit.setText(fs.fit_label)
+        self.n_peaks_spin.setValue(fs.fit.n_peaks)
+        self.background_order_spin.setValue(fs.fit.background_order)
+        self.allow_scale_check.setChecked(fs.fit.allow_scale)
+        self.common_scale_check.setChecked(fs.fit.common_scale)
+        self.loss_combo.setCurrentText(fs.fit.loss)
+        self.init_mus_edit.setText(", ".join(str(v) for v in fs.fit.init_mus) if fs.fit.init_mus else "")
+        self.mu_ranges_edit.setText("; ".join(f"{lo}:{hi}" for lo, hi in fs.fit.mu_bounds) if fs.fit.mu_bounds else "")
+        self.min_sep_spin.setValue(fs.fit.min_separation)
+        self.auto_store_check.setChecked(fs.auto_store)
+
+        self.block_size_edit.setText(str(fs.uncertainty.block_size))
+        self.run_boot_check.setChecked(fs.uncertainty.run_bootstrap)
+        self.n_boot_spin.setValue(fs.uncertainty.n_boot)
+        self.run_tpl_prop_check.setChecked(fs.uncertainty.run_template_propagation)
+        self.tpl_prop_spin.setValue(fs.uncertainty.n_template_prop)
+        self.seed_spin.setValue(fs.uncertainty.random_seed)
+        self.region.setRegion(list(fs.region_hz))
+
+        lines = [f"Loaded session: {len(self.templates)} template(s), {len(self.fit_records)} fit(s)."]
+        lines.extend(f"WARNING: {w}" for w in report.input_warnings)
+        if report.ok:
+            lines.append("All saved values reproduced within tolerance.")
+        else:
+            lines.append(f"{len(report.mismatches)} mismatch(es):")
+            lines.extend(f"  {m}" for m in report.mismatches)
+        self.summary_text.setPlainText("\n".join(lines))
+        self.tabs.setCurrentIndex(2)
+        if report.ok:
+            self.status("Session loaded and verified.")
+        else:
+            self.status(f"Session loaded with {len(report.mismatches)} mismatch(es) — see Summary tab.")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Session verification",
+                f"{len(report.mismatches)} value(s) did not reproduce within tolerance. See the Summary tab for details.",
+            )
 
     def refresh_history_table(self, select_last: bool = False) -> None:
         self._updating_history_table = True
