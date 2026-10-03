@@ -62,6 +62,10 @@ dev = [
     "pre-commit>=3.7",
     "build>=1.2",
     "twine>=5.1",
+    # Unconditional: pyright checks against pythonVersion=3.10 (see below) on
+    # every CI job regardless of its actual interpreter, so it always needs
+    # this resolvable -- unlike the core dependency's python_version marker.
+    "tomli>=2.0",
 ]
 
 [project.urls]
