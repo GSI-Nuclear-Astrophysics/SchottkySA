@@ -12,6 +12,7 @@
 - Tight absolute-frequency checkpoint comparisons.
 - Consistent runtime, distribution and citation versions.
 - Curated distribution contents and manual publishing workflow.
+- Exclude PySide6 6.12.0 after reproducing its Linux reference-counting bug on Python 3.10 and 3.11.
 
 ## 1.0.0
 
