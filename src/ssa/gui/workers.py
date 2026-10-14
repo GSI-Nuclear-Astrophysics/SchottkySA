@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 from pyqtgraph.Qt import QtCore
 
+from ssa.constants import DEFAULT_SEPARATION_PENALTY_STRENGTH
 from ssa.fitting import fit_template_region, mu_bounds_to_string
+from ssa.profile_tools import combine_template_entries, compare_template_entries
 from ssa.session import ReplayReport, Session, replay_session
 from ssa.templates import bootstrap_template_bank
 from ssa.uncertainty import bootstrap_fit, propagate_template_uncertainty_to_target_fit
@@ -32,6 +34,10 @@ class AnalysisWorker(QtCore.QThread):
                 self._run_build_template()
             elif self.mode == "fit_region":
                 self._run_fit_region()
+            elif self.mode == "combine_profiles":
+                self.finished_ok.emit(combine_template_entries(**self.payload))
+            elif self.mode == "compare_profiles":
+                self.finished_ok.emit(compare_template_entries(**self.payload))
             else:
                 raise ValueError(f"Unknown worker mode: {self.mode}")
         except Exception:
@@ -55,6 +61,10 @@ class AnalysisWorker(QtCore.QThread):
             edge_mode=p.get("edge_mode", "none"),
             edge_width_hz=p.get("edge_width_hz", 0.0),
             edge_fraction=p.get("edge_fraction", 0.08),
+            left_edge_points=p.get("left_edge_points", 0),
+            right_edge_points=p.get("right_edge_points", 0),
+            left_tail_width_hz=p.get("left_tail_width_hz", 0),
+            right_tail_width_hz=p.get("right_tail_width_hz", 0),
         )
         result["settings"] = {
             "n_template_boot_requested": p["n_template_boot"],
@@ -68,6 +78,10 @@ class AnalysisWorker(QtCore.QThread):
             "edge_mode": p.get("edge_mode", "none"),
             "edge_width_hz": p.get("edge_width_hz", 0.0),
             "edge_fraction": p.get("edge_fraction", 0.08),
+            "left_edge_points": p.get("left_edge_points", 0),
+            "right_edge_points": p.get("right_edge_points", 0),
+            "left_tail_width_hz": p.get("left_tail_width_hz", 0),
+            "right_tail_width_hz": p.get("right_tail_width_hz", 0),
         }
         self.finished_ok.emit(result)
 
@@ -80,6 +94,7 @@ class AnalysisWorker(QtCore.QThread):
             p["x"],
             p["y"],
             template=p["template"],
+            component_templates=p.get("component_templates"),
             n_peaks=p["n_peaks"],
             init_mus=p.get("init_mus"),
             background_order=p["background_order"],
@@ -87,6 +102,7 @@ class AnalysisWorker(QtCore.QThread):
             common_scale=p["common_scale"],
             loss=p["loss"],
             min_separation=p["min_separation"],
+            separation_penalty_strength=p.get("separation_penalty_strength", DEFAULT_SEPARATION_PENALTY_STRENGTH),
             mu_bounds=p.get("mu_bounds"),
         )
 
@@ -96,12 +112,13 @@ class AnalysisWorker(QtCore.QThread):
             boot = bootstrap_fit(fit, n_boot=p["n_boot"], block_size=p["block_size"], rng=rng)
 
         tpl_prop = None
-        if p["run_template_propagation"] and p.get("template_bank"):
+        if p["run_template_propagation"] and (p.get("template_bank") or p.get("component_template_banks") is not None):
             self.progress.emit("Propagating template-shape uncertainty...")
             tpl_prop = propagate_template_uncertainty_to_target_fit(
                 fit,
                 p["template_bank"],
                 n_draws=p["n_template_prop"],
+                component_template_banks=p.get("component_template_banks"),
                 random_seed=p["random_seed"],
             )
 

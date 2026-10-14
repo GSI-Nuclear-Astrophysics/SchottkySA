@@ -204,3 +204,10 @@ def test_replay_session_detects_tampered_verify_value(tmp_path):
     report = replay_session(session)
     assert report.ok is False
     assert any("raw_area" in m for m in report.mismatches)
+
+
+def test_absolute_frequency_checkpoint_is_not_compared_to_rf_carrier():
+    from ssa.session import _diff_scalars
+
+    assert _diff_scalars("peak", {"mu_fit_Hz": 412000000.0}, {"mu_fit_Hz": 412000000.01})
+    assert not _diff_scalars("peak", {"mu_fit_Hz": 412000000.0}, {"mu_fit_Hz": 412000000.000001})

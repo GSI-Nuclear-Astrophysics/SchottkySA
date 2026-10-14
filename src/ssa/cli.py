@@ -104,6 +104,18 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--edge-mode", choices=list(EDGE_MODES), default="none")
     run_parser.add_argument("--edge-width-hz", type=float, default=0.0)
     run_parser.add_argument("--edge-fraction", type=float, default=0.08)
+    run_parser.add_argument(
+        "--left-edge-points", type=int, default=0, help="Independent edge override; 0 inherits the common setting."
+    )
+    run_parser.add_argument(
+        "--right-edge-points", type=int, default=0, help="Independent edge override; 0 inherits the common setting."
+    )
+    run_parser.add_argument(
+        "--left-tail-width-hz", type=float, default=0, help="Independent edge override; 0 inherits the common setting."
+    )
+    run_parser.add_argument(
+        "--right-tail-width-hz", type=float, default=0, help="Independent edge override; 0 inherits the common setting."
+    )
     run_parser.add_argument("--n-template-boot", type=int, default=300)
 
     run_parser.add_argument("--n-boot", type=int, default=1000)
@@ -157,6 +169,10 @@ def _run_command(args: argparse.Namespace) -> int:
             edge_mode=args.edge_mode,
             edge_width_hz=args.edge_width_hz,
             edge_fraction=args.edge_fraction,
+            left_edge_points=args.left_edge_points,
+            right_edge_points=args.right_edge_points,
+            left_tail_width_hz=args.left_tail_width_hz,
+            right_tail_width_hz=args.right_tail_width_hz,
         )
         fit_config = FitConfig(
             n_peaks=args.n_peaks,

@@ -1,14 +1,4 @@
-"""Input loading and output export -- no Qt/GUI dependency.
-
-Covers NPZ key selection, the fit-history export row schema, delimited/
-JSON/XLSX/ODS writers, TSV clipboard formatting, and current-fit NPZ overlay
-export.
-
-The interactive "ask the user which array is frequency/amplitude" dialog
-stays in the GUI layer (``ssa.gui.main_window``); this module raises
-:class:`~ssa.exceptions.InputFormatError` instead when key selection is
-ambiguous, so it is usable head-less (Python API, tests, CLI).
-"""
+"""Spectrum input, component tables and curve exports without a Qt dependency."""
 
 from __future__ import annotations
 
@@ -202,30 +192,27 @@ def make_export_rows_for_result(
     ``template_registry`` is a list of ``{"template": PeakTemplate,
     "region_lo": ..., "region_hi": ..., "settings": ..., "template_bank":
     [...]}`` entries, used to look up template-region provenance for the
-    fit's active template. Pass ``None``/``[]`` if that provenance is
+    each component's template. Pass ``None``/``[]`` if that provenance is
     unavailable (all `template_*`/`tpl_*` fields are `NaN`).
     """
     fit = result["fit"]
     boot = result.get("bootstrap")
     tpl_prop = result.get("template_propagation")
     tpl = fit["template"]
-    template_name = getattr(tpl, "name", "template")
     fit_lo, fit_hi = float(np.nanmin(fit["x"])), float(np.nanmax(fit["x"]))
 
-    tpl_entry: dict[str, Any] = {}
-    for entry in template_registry or []:
-        if entry.get("template") is tpl:
-            tpl_entry = entry
-            break
-    tpl_lo = tpl_entry.get("region_lo", np.nan)
-    tpl_hi = tpl_entry.get("region_hi", np.nan)
-    tpl_settings = tpl_entry.get("settings", {})
-
     rows = []
-    widths = component_widths_from_params(fit["params"], fit["param_names"], tpl, fit["n_peaks"])
+    widths = component_widths_from_params(
+        fit["params"], fit["param_names"], tpl, fit["n_peaks"], fit.get("component_templates")
+    )
     qrows = component_quantiles_from_fit(fit)
 
     for k in range(fit["n_peaks"]):
+        tpl = (fit.get("component_templates") or [fit["template"]] * fit["n_peaks"])[k]
+        template_name = getattr(tpl, "name", "template")
+        tpl_entry = next((e for e in template_registry or [] if e.get("template") is tpl), {})
+        tpl_lo, tpl_hi = tpl_entry.get("region_lo", np.nan), tpl_entry.get("region_hi", np.nan)
+        tpl_settings = tpl_entry.get("settings", {})
         mu_name = f"mu_{k}"
         width_name = f"width_{k}"
 
@@ -269,6 +256,10 @@ def make_export_rows_for_result(
             "region_hi": fit_hi,
             "template_smooth_nominal": tpl_settings.get("smooth_nominal_template", np.nan),
             "template_resample_factor": tpl_settings.get("resample_factor", np.nan),
+            "template_left_edge_points": tpl_settings.get("left_edge_points", 0),
+            "template_right_edge_points": tpl_settings.get("right_edge_points", 0),
+            "template_left_tail_width_hz": tpl_settings.get("left_tail_width_hz", 0),
+            "template_right_tail_width_hz": tpl_settings.get("right_tail_width_hz", 0),
             "n_peaks": fit["n_peaks"],
             "background_order": fit["background_order"],
             "loss": fit["loss"],
@@ -333,6 +324,17 @@ def make_export_rows_for_result(
             "dof": int(fit["dof"]),
             "notes": notes,
         }
+        if "harmonic" in tpl_entry:
+            row["template_harmonic"] = float(tpl_entry.get("source_harmonic", tpl_entry["harmonic"]))
+            row["target_harmonic"] = float(tpl_entry.get("target_harmonic", tpl_entry["harmonic"]))
+            row["harmonic_scale_factor"] = float(tpl_entry.get("frequency_scale_factor", 1.0))
+        if tpl_entry.get("harmonic_expression"):
+            row["template_harmonic_expression"] = tpl_entry["harmonic_expression"]
+        if result.get("target_harmonic_expression"):
+            row["target_harmonic_expression"] = result["target_harmonic_expression"]
+        combination = getattr(tpl, "edge_info", {}).get("combination_bank_mode")
+        if combination is not None:
+            row["template_combination_uncertainty_mode"] = combination
         rows.append(row)
     return rows
 
@@ -458,6 +460,13 @@ def export_current_overlay_npz(fit: dict[str, Any], path: str | Path) -> None:
         "template_pdf": tpl.pdf,
         "template_cdf": tpl.cdf,
     }
+    # Keep the legacy first-template keys above, and retain every assigned
+    # profile independently (supports need not have the same length).
+    templates = fit.get("component_templates") or [tpl] * fit["n_peaks"]
+    payload["component_template_names"] = np.asarray([t.name for t in templates], dtype=str)
+    for k, component_template in enumerate(templates):
+        for coordinate in ("u", "pdf", "cdf"):
+            payload[f"component_{k}_template_{coordinate}"] = getattr(component_template, coordinate)
     np.savez(path, **payload)
 
 

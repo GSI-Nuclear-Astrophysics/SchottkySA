@@ -1,60 +1,137 @@
-"""Minimal end-to-end SchottkySA example: no GUI required.
+"""Fit the public two-component fixture and save a verified replay recipe.
 
-Builds an empirical template from an isolated reference peak, fits a target
-region, and prints the fitted centroid/area with residual-bootstrap and
-template-shape-propagation uncertainties.
-
-Run with:
-    python examples/quickstart.py
-
-Uses the same synthetic fixtures as the test suite (tests/data/*.npz) -- not
-real experimental data. See tests/baseline/make_fixtures.py for how they
-were generated.
+Run ``python examples/quickstart.py --output example-results`` to retain the
+tables and session. The fixtures are constructed inputs, not measurements.
 """
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ssa import (
-    bootstrap_fit,
-    build_peak_template,
-    combined_sigma,
-    component_quantiles_from_fit,
-    fit_template_region,
+from ssa import __version__
+from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
+from ssa.io import (
+    export_history_rows,
     load_spectrum_npz,
-    quality_flag_for_fit,
+    make_export_rows_for_result,
+    select_frequency_range,
+    write_curve_csv,
+)
+from ssa.pipeline import build_template_bank, run_fit_with_uncertainty
+from ssa.session import (
+    SCHEMA_VERSION,
+    FitRecord,
+    FormState,
+    InputRef,
+    Session,
+    TemplateRecord,
+    load_session,
+    replay_session,
+    save_session,
 )
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "tests" / "data"
 
 
-def main() -> None:
-    # 1. Build the empirical template from an isolated, high-SNR reference peak.
-    f_ref, y_ref, fkey, ykey = load_spectrum_npz(DATA_DIR / "synthetic_reference_peak.npz")
-    print(f"Loaded reference peak: {len(f_ref)} points ({fkey}/{ykey})")
-    template = build_peak_template(f_ref, y_ref, name="reference_peak")
-    print(f"Template: raw_area={template.raw_area:.6g}, raw_cog={template.raw_cog:.6f} Hz")
+def run_example(output: Path, draws: int = 100):
+    """Return the saved session and results after checking their replay."""
+    output.mkdir(parents=True, exist_ok=True)
+    source = DATA_DIR / "synthetic_full_spectrum.npz"
+    x, y, fkey, ykey = load_spectrum_npz(source)
+    reference_region = (1937300.0, 1937360.0)
+    target_region = (1937370.0, 1937420.0)
+    template_config = TemplateBuildConfig(name="isolated reference", n_template_boot=draws)
+    fit_config = FitConfig(n_peaks=2, init_mus=[1937390.0, 1937397.5])
+    uncertainty_config = UncertaintyConfig(n_boot=draws, n_template_prop=draws)
 
-    # 2. Fit a single-peak target region with that template.
-    f_target, y_target, _, _ = load_spectrum_npz(DATA_DIR / "synthetic_single_peak.npz")
-    fit = fit_template_region(f_target, y_target, template=template, n_peaks=1)
-    print(
-        f"\nFit: mu={fit['info']['mus'][0]:.6f} Hz, area={fit['info']['areas'][0]:.6g}, "
-        f"red_chi2={fit['red_chi2']:.4g}, quality={quality_flag_for_fit(fit)}"
+    fx, fy, _ = select_frequency_range(x, y, None, *reference_region)
+    bank = build_template_bank(fx, fy, template_config)
+    tx, ty, _ = select_frequency_range(x, y, None, *target_region)
+    result = run_fit_with_uncertainty(
+        tx, ty, bank["template_nominal"], bank["templates"], fit_config, uncertainty_config
     )
+    registry = [
+        {
+            "template": bank["template_nominal"],
+            "template_bank": bank["templates"],
+            "region_lo": reference_region[0],
+            "region_hi": reference_region[1],
+            "settings": {
+                "smooth_nominal_template": template_config.smooth,
+                "resample_factor": template_config.resample_factor,
+            },
+        }
+    ]
+    rows = make_export_rows_for_result(
+        result, label="doublet", template_registry=registry, notes="Constructed public example"
+    )
+    template = bank["template_nominal"]
+    q16, q50, q84 = template.quantile([0.16, 0.50, 0.84])
+    template_checkpoints = {
+        "raw_area": float(template.raw_area),
+        "raw_cog": float(template.raw_cog),
+        "raw_std": float(template.raw_std),
+        "q16": float(q16),
+        "q50": float(q50),
+        "q84": float(q84),
+        "n_template_bank": len(bank["templates"]),
+    }
+    session = Session(
+        schema_version=SCHEMA_VERSION,
+        ssa_version=__version__,
+        created_utc=datetime.now(timezone.utc).isoformat(),
+        input=InputRef(str(source.resolve()), hashlib.sha256(source.read_bytes()).hexdigest(), fkey, ykey),
+        form_state=FormState(
+            template_config, fit_config, "doublet", True, uncertainty_config, target_region, active_template_id=0
+        ),
+        templates=[TemplateRecord(0, reference_region, template_config, template_checkpoints)],
+        fits=[
+            FitRecord(
+                "doublet",
+                "Constructed public example",
+                0,
+                target_region,
+                fit_config,
+                uncertainty_config,
+                verify_rows=rows,
+            )
+        ],
+    )
+    session_path = output / "session.toml"
+    save_session(session_path, session)
+    report = replay_session(load_session(session_path))
+    if not report.ok:
+        raise RuntimeError(f"Example replay failed: {report.mismatches}")
+    fit = result["fit"]
+    write_curve_csv(
+        output / "doublet_curve.csv", fit["x"], fit["y"], fit["y_model"], fit["background"], fit["components"]
+    )
+    export_history_rows(rows, output / "components.csv")
+    for name, xx, yy in (("reference.csv", fx, fy), ("target.csv", tx, ty)):
+        np.savetxt(output / name, np.column_stack([xx, yy]), delimiter=",", header="frequency_hz,power", comments="")
+    return session, result, report
 
-    # 3. Residual block-bootstrap uncertainty on the fitted centroid.
-    boot = bootstrap_fit(fit, n_boot=300, rng=np.random.default_rng(12345))
-    mu_boot = boot["summary"]["mu_0"]
-    print(f"Bootstrap mu: {mu_boot['median']:.6f} -{mu_boot['minus']:.3g} +{mu_boot['plus']:.3g} Hz")
 
-    # 4. Component width/quantile summary.
-    qrows = component_quantiles_from_fit(fit)
-    print(f"sigma68 = {qrows[0]['sigma68_Hz']:.4g} Hz")
-    print(f"Combined mu sigma (bootstrap only here) = {combined_sigma(mu_boot):.4g} Hz")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, help="Retain the example files in this directory.")
+    parser.add_argument("--draws", type=int, default=100, help="Draws per uncertainty stream.")
+    args = parser.parse_args()
+    with TemporaryDirectory() as temporary:
+        output = args.output or Path(temporary)
+        _, result, report = run_example(output, args.draws)
+        fit = result["fit"]
+        for index, (mu, area) in enumerate(zip(fit["info"]["mus"], fit["info"]["areas"], strict=True)):
+            print(f"C{index + 1}: centroid={mu:.6f} Hz; area={area:.6g}")
+        print(f"Replay verified: {report.ok}")
+        if args.output:
+            print(f"Example files: {output}")
 
 
 if __name__ == "__main__":

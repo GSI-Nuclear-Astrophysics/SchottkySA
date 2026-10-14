@@ -2,23 +2,25 @@
 title: SchottkySA
 ---
 
-# SchottkySA — Schottky Shape Analyzer
+# SchottkySA
 
-Empirical-template peak fitting and uncertainty analysis for Schottky
-spectra, with a Qt GUI.
+SchottkySA extracts component frequencies, integrated areas and widths from
+measured spectra using empirical reference profiles. The Python, command-line
+and Qt interfaces share the same numerical pipeline.
 
-SchottkySA fits one or more peaks in a Schottky (or similar) frequency-domain
-spectrum using a **non-parametric, empirical peak template** built directly
-from an isolated, high-signal-to-noise reference peak in your own data —
-rather than an assumed analytic line shape (Gaussian, Lorentzian, ...). It
-reports fitted centroid, area, and width per component, with uncertainties
-from residual block-bootstrap resampling and template-shape propagation.
+The GUI supports component-specific templates, interactive centroid intervals,
+independent left and right edge controls, harmonic conversion, reciprocal profile
+fits and weighted profile combinations. Target and finite-reference resampling
+are exported separately. Saved TOML recipes reconstruct the analysis and check
+its numerical results.
 
-* [Source code and installation instructions]({{ site.github.repository_url | default: "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA" }})
-* [Scientific method](SCIENTIFIC_METHOD.html) — equations, conventions, units, algorithm.
-* [Reproducibility](REPRODUCIBILITY.html) — environment and validation steps.
+Install the graphical package with `pip install 'SchottkySA[gui]'` and launch
+`ssa`. The numerical core can be installed without Qt.
 
-## Citation
+* [Source and installation instructions](https://github.com/GSI-Nuclear-Astrophysics/SchottkySA)
+* [Scientific method](SCIENTIFIC_METHOD.html): conventions and uncertainty outputs.
+* [Profile workbench](PROFILE_WORKBENCH.html): comparisons, combinations and controls.
+* [Reproducibility](REPRODUCIBILITY.html): saved recipes and headless replay.
 
-If you use SchottkySA in published work, please cite it — see `CITATION.cff`
-in the repository root.
+The source distribution includes a portable constructed example. Cite the
+software version used in your analysis, as described in `CITATION.cff`.

@@ -1,13 +1,6 @@
-"""Headless orchestration: template construction -> fit -> uncertainty.
+"""Qt-independent template construction, fitting and uncertainty orchestration.
 
-This is the same sequence of calls as ``ssa.gui.workers.AnalysisWorker``
-(build template bank, fit, bootstrap, template-propagation), extracted into
-plain, synchronous, Qt-free functions so both the GUI worker and the ``ssa
-run`` CLI (``ssa.cli``) share one implementation instead of two.
-
-Nothing here changes any default value or numerical behaviour relative to
-``AnalysisWorker._run_build_template``/``_run_fit_region``: every call below
-passes the same arguments, in the same order.
+The command line and GUI workers use this common pipeline.
 """
 
 from __future__ import annotations
@@ -30,15 +23,10 @@ from ssa.uncertainty import (
 
 __all__ = ["build_template_bank", "run_fit_with_uncertainty", "build_run_summary"]
 
-# Known, documented gaps in the currently-implemented pipeline. Surfaced in
-# every `ssa run` JSON summary so the tool's own output stays honest about
-# its current scope rather than silently implying more than it does.
+# Record uncertainty-model assumptions with each exported fit.
 KNOWN_LIMITATIONS: tuple[str, ...] = (
     "No conservative (Birge-ratio) covariance floor is applied; only raw "
     "target-bootstrap and template-propagation intervals are reported.",
-    "Bootstrap templates are built with edge_mode='none' regardless of the "
-    "nominal template's edge_mode; this only affects results built with a "
-    "non-default edge_mode.",
     "The target-fit residual bootstrap resamples raw (not sigma-standardized) "
     "residuals; a no-op for a scalar/homoscedastic sigma, but not exact for a "
     "genuinely heteroscedastic supplied sigma column.",
@@ -46,12 +34,7 @@ KNOWN_LIMITATIONS: tuple[str, ...] = (
 
 
 def build_template_bank(x: np.ndarray, y: np.ndarray, config: TemplateBuildConfig) -> dict[str, Any]:
-    """Build the nominal template plus its bootstrap bank from a reference region.
-
-    Thin wrapper around :func:`ssa.templates.bootstrap_template_bank` that
-    takes a :class:`~ssa.config.TemplateBuildConfig` instead of individual
-    keyword arguments -- the same values, same defaults.
-    """
+    """Build a nominal reference and its bootstrap bank from template settings."""
     return bootstrap_template_bank(
         x,
         y,
@@ -67,6 +50,10 @@ def build_template_bank(x: np.ndarray, y: np.ndarray, config: TemplateBuildConfi
         edge_mode=config.edge_mode,
         edge_width_hz=config.edge_width_hz,
         edge_fraction=config.edge_fraction,
+        left_edge_points=config.left_edge_points,
+        right_edge_points=config.right_edge_points,
+        left_tail_width_hz=config.left_tail_width_hz,
+        right_tail_width_hz=config.right_tail_width_hz,
     )
 
 
@@ -78,19 +65,18 @@ def run_fit_with_uncertainty(
     fit_config: FitConfig,
     unc_config: UncertaintyConfig,
     sigma: np.ndarray | float | None = None,
+    component_templates: list[PeakTemplate] | None = None,
+    component_template_banks: list[list[PeakTemplate]] | None = None,
 ) -> dict[str, Any]:
-    """Fit a target region and propagate both uncertainty sources.
+    """Fit a target and, when selected, evaluate target and reference resampling.
 
-    Same three-step sequence as ``AnalysisWorker._run_fit_region``: the
-    least-squares fit, then (if requested) the target-residual block
-    bootstrap, then (if requested and a template bank is available) the
-    template-shape propagation. Returns
-    ``{"fit": ..., "bootstrap": ... | None, "template_propagation": ... | None}``.
+    Returns the nominal fit and each requested uncertainty stream separately.
     """
     fit = fit_template_region(
         x,
         y,
         template=template,
+        component_templates=component_templates,
         n_peaks=fit_config.n_peaks,
         init_mus=fit_config.init_mus,
         sigma=sigma,
@@ -110,9 +96,13 @@ def run_fit_with_uncertainty(
         boot = bootstrap_fit(fit, n_boot=unc_config.n_boot, block_size=unc_config.block_size, rng=rng)
 
     tpl_prop = None
-    if unc_config.run_template_propagation and template_bank:
+    if unc_config.run_template_propagation and (template_bank or component_template_banks is not None):
         tpl_prop = propagate_template_uncertainty_to_target_fit(
-            fit, template_bank, n_draws=unc_config.n_template_prop, random_seed=unc_config.random_seed
+            fit,
+            template_bank,
+            n_draws=unc_config.n_template_prop,
+            random_seed=unc_config.random_seed,
+            component_template_banks=component_template_banks,
         )
 
     return {"fit": fit, "bootstrap": boot, "template_propagation": tpl_prop}
@@ -177,6 +167,11 @@ def build_run_summary(
             "edge_mode": template_config.edge_mode,
             "edge_width_hz": template_config.edge_width_hz,
             "edge_fraction": template_config.edge_fraction,
+            "left_edge_points": template_config.left_edge_points,
+            "right_edge_points": template_config.right_edge_points,
+            "left_tail_width_hz": template_config.left_tail_width_hz,
+            "right_tail_width_hz": template_config.right_tail_width_hz,
+            "edge_info": tpl.edge_info,
             "raw_area": tpl.raw_area,
             "raw_cog_hz": tpl.raw_cog,
             "raw_std_hz": tpl.raw_std,

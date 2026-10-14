@@ -7,6 +7,7 @@ optional ``gui`` extra (``pip install SchottkySA[gui]``).
 
 from __future__ import annotations
 
+from ssa._version import __version__
 from ssa.fitting import fit_template_region, template_model
 from ssa.io import load_spectrum_npz, make_export_rows_for_result
 from ssa.preprocessing import prepare_xy
@@ -18,8 +19,6 @@ from ssa.uncertainty import (
     propagate_template_uncertainty_to_target_fit,
     quality_flag_for_fit,
 )
-
-__version__ = "0.1.0"
 
 __all__ = [
     "__version__",

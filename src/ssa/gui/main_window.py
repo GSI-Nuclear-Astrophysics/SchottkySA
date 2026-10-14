@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,12 +14,16 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ssa import __version__ as SSA_VERSION
+from ssa.bundles import create_run_directory
 from ssa.config import FitConfig, TemplateBuildConfig, UncertaintyConfig
 from ssa.constants import EDGE_MODES, LOSS_CHOICES
+from ssa.gui.component_picker import ComponentPickerMixin
+from ssa.gui.profile_workbench import ProfileWorkbenchMixin
 from ssa.gui.workers import AnalysisWorker, SessionReplayWorker
 from ssa.io import export_current_overlay_npz as _export_current_overlay_npz
 from ssa.io import export_history_rows, make_export_rows_for_result, rows_to_tsv, select_npz_keys
 from ssa.preprocessing import prepare_xy
+from ssa.profile_tools import transfer_template_entry
 from ssa.session import (
     SCHEMA_VERSION,
     FitRecord,
@@ -27,6 +33,7 @@ from ssa.session import (
     Session,
     TemplateRecord,
     _sha256_of,
+    _to_toml_value,
 )
 from ssa.session import (
     load_session as _load_session,
@@ -63,10 +70,10 @@ def _template_verify_from_entry(entry: dict[str, Any]) -> dict[str, float]:
     }
 
 
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(ComponentPickerMixin, ProfileWorkbenchMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SchottkySA -- Schottky Template Peak Analyzer")
+        self.setWindowTitle("SchottkySA -- Schottky Shape Analyzer")
         self.resize(1650, 950)
 
         self.frequency: np.ndarray | None = None
@@ -84,10 +91,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker: AnalysisWorker | None = None
         self._updating_history_table = False
         self._loading_session: Session | None = None
+        self._bundle_dir: Path | None = None
+        self._bundle_signature: str | None = None
+        self._data_sha256: str | None = None
+        self._restored_template_config: TemplateBuildConfig | None = None
+        self._restored_fit_config: FitConfig | None = None
 
         pg.setConfigOptions(antialias=False)
 
         self._build_ui()
+        self._install_profile_workbench()
+        self._install_component_picker()
+        self._overlay_plot = self.plot
         self._connect_signals()
 
     # ----------------------------- UI construction ----------------------------
@@ -97,8 +112,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
 
         file_menu = self.menuBar().addMenu("&File")
-        self.save_session_action = file_menu.addAction("Save Session...")
-        self.load_session_action = file_menu.addAction("Load Session...")
+        self.save_session_action = file_menu.addAction("Save config + tables…")
+        self.load_session_action = file_menu.addAction("Replay config…")
 
         layout = QtWidgets.QHBoxLayout(central)
 
@@ -160,6 +175,33 @@ class MainWindow(QtWidgets.QMainWindow):
         file_form.addWidget(self.region_label)
         control_layout.addWidget(file_group)
 
+        # Visible saved-run controls, independent of platform menu placement.
+        session_group = QtWidgets.QGroupBox("Saved runs: configuration and tables")
+        session_form = QtWidgets.QFormLayout(session_group)
+        self.output_parent_edit = QtWidgets.QLineEdit()
+        self.output_parent_edit.setPlaceholderText("Choose an output parent folder")
+        self.output_browse_btn = QtWidgets.QPushButton("Browse…")
+        parent_row = QtWidgets.QHBoxLayout()
+        parent_row.addWidget(self.output_parent_edit)
+        parent_row.addWidget(self.output_browse_btn)
+        session_form.addRow("Output parent", parent_row)
+        self.bundle_label_edit = QtWidgets.QLineEdit()
+        self.bundle_label_edit.setPlaceholderText("Optional label, e.g. region or setting")
+        session_form.addRow("Folder label", self.bundle_label_edit)
+        self.table_format_combo = QtWidgets.QComboBox()
+        self.table_format_combo.addItems(["CSV", "TSV", "JSON", "XLSX", "ODS"])
+        session_form.addRow("Additional table format", self.table_format_combo)
+        self.save_config_btn = QtWidgets.QPushButton("Save config + tables")
+        self.replay_config_btn = QtWidgets.QPushButton("Replay config…")
+        session_buttons = QtWidgets.QHBoxLayout()
+        session_buttons.addWidget(self.save_config_btn)
+        session_buttons.addWidget(self.replay_config_btn)
+        session_form.addRow(session_buttons)
+        self.bundle_path_label = QtWidgets.QLabel("DATE_SchottkySA_CONFIG[_label]")
+        self.bundle_path_label.setWordWrap(True)
+        session_form.addRow(self.bundle_path_label)
+        control_layout.addWidget(session_group)
+
         # Template group
         tpl_group = QtWidgets.QGroupBox("Template construction")
         tpl_layout = QtWidgets.QFormLayout(tpl_group)
@@ -190,6 +232,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edge_fraction_spin.setRange(0.01, 0.49)
         self.edge_fraction_spin.setDecimals(3)
         self.edge_fraction_spin.setValue(0.08)
+        self.edge_side_spins = {}
+        for side in ("left", "right"):
+            points = QtWidgets.QSpinBox()
+            points.setRange(0, 100000)
+            points.setSpecialValueText("auto")
+            points.setToolTip(
+                "Number of measured edge samples used for this side. 0 inherits the shared width/fraction; actual counts appear in the preview."
+            )
+            distance = QtWidgets.QDoubleSpinBox()
+            distance.setRange(0.0, 1e9)
+            distance.setDecimals(9)
+            distance.setSpecialValueText("auto")
+            distance.setToolTip(
+                "Distance in spectrum Hz from this ROI boundary to the zero anchor outside the ROI. Applies to local-slope/PCHIP/padding; 0 inherits the shared width. Smaller values give a sharper closure."
+            )
+            self.edge_side_spins[f"{side}_edge_points"] = points
+            self.edge_side_spins[f"{side}_tail_width_hz"] = distance
         self.build_template_btn = QtWidgets.QPushButton("Build/store template from selected region")
         self.template_combo = QtWidgets.QComboBox()
         tpl_layout.addRow("Name", self.template_name_edit)
@@ -201,6 +260,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tpl_layout.addRow("Template edge mode", self.edge_mode_combo)
         tpl_layout.addRow("Edge width [Hz] (0=auto)", self.edge_width_spin)
         tpl_layout.addRow("Edge fraction", self.edge_fraction_spin)
+        for side in ("left", "right"):
+            tpl_layout.addRow(f"{side.title()} edge samples (0=auto)", self.edge_side_spins[f"{side}_edge_points"])
+            tpl_layout.addRow(f"{side.title()} zero distance [Hz]", self.edge_side_spins[f"{side}_tail_width_hz"])
         tpl_layout.addRow(self.build_template_btn)
         tpl_layout.addRow("Active template", self.template_combo)
         control_layout.addWidget(tpl_group)
@@ -367,19 +429,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         history_layout.addWidget(self.history_table)
 
-        hist_buttons = QtWidgets.QHBoxLayout()
+        hist_buttons = QtWidgets.QGridLayout()
         self.store_current_btn = QtWidgets.QPushButton("Store current fit")
         self.copy_selected_btn = QtWidgets.QPushButton("Copy selected rows")
         self.copy_all_btn = QtWidgets.QPushButton("Copy all rows")
         self.export_history_btn = QtWidgets.QPushButton("Export fit history")
         self.export_overlay_btn = QtWidgets.QPushButton("Export current overlay NPZ")
         self.delete_selected_btn = QtWidgets.QPushButton("Delete selected")
-        hist_buttons.addWidget(self.store_current_btn)
-        hist_buttons.addWidget(self.copy_selected_btn)
-        hist_buttons.addWidget(self.copy_all_btn)
-        hist_buttons.addWidget(self.export_history_btn)
-        hist_buttons.addWidget(self.export_overlay_btn)
-        hist_buttons.addWidget(self.delete_selected_btn)
+        hist_buttons.addWidget(self.store_current_btn, 0, 0)
+        hist_buttons.addWidget(self.copy_selected_btn, 0, 1)
+        hist_buttons.addWidget(self.copy_all_btn, 1, 0)
+        hist_buttons.addWidget(self.export_history_btn, 1, 1)
+        hist_buttons.addWidget(self.export_overlay_btn, 2, 0)
+        hist_buttons.addWidget(self.delete_selected_btn, 2, 1)
         history_layout.addLayout(hist_buttons)
 
         self.tabs.addTab(history_widget, "Stored fits")
@@ -397,10 +459,16 @@ class MainWindow(QtWidgets.QMainWindow):
         res_layout.addWidget(self.tabs)
         control_layout.addWidget(results_group)
 
+        # Keep the saved-run buttons reachable when long option labels need wrapping.
+        for form in control_container.findChildren(QtWidgets.QFormLayout):
+            form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         control_layout.addStretch(1)
         self.statusBar().showMessage("Ready")
 
     def _connect_signals(self) -> None:
+        self.save_config_btn.clicked.connect(self.save_session)
+        self.replay_config_btn.clicked.connect(self.load_session)
+        self.output_browse_btn.clicked.connect(self._choose_output_parent)
         self.save_session_action.triggered.connect(self.save_session)
         self.load_session_action.triggered.connect(self.load_session)
         self.load_btn.clicked.connect(self.load_npz)
@@ -439,19 +507,41 @@ class MainWindow(QtWidgets.QMainWindow):
             y = np.asarray(data[y_key], dtype=float).ravel()
             f, y = prepare_xy(f, y)
 
+            new_sha256 = _sha256_of(path)
+            if self._data_sha256 != new_sha256:
+                # A session must never associate old fits with a different spectrum.
+                self.templates = []
+                self.fit_records = []
+                self.comparison_runs = []
+                self._clear_profile_displays()
+                self._clear_all_graphical_components()
+                self.refresh_profile_sources()
+                self.template_combo.clear()
+                self.refresh_history_table()
+                self.last_result = None
+                self.last_fit_config = None
+                self.last_uncertainty_config = None
+                self._restored_template_config = None
+                self._restored_fit_config = None
             self.frequency = f
             self.amplitude = y
-            self.current_file = Path(path)
+            self.current_file = Path(path).resolve()
+            self._data_sha256 = new_sha256
             self._frequency_key = f_key
             self._amplitude_key = y_key
             self.file_label.setText(f"{Path(path).name}\nfrequency: {f_key}, amplitude: {y_key}\nN={len(f):,}")
             self.data_curve.setData(f, y)
+            self.secondary_data_curve.setData(f, y)
             self.plot.setXRange(float(f.min()), float(f.max()), padding=0.02)
             self.plot.setYRange(float(np.nanmin(y)), float(np.nanmax(y)), padding=0.05)
 
             span = float(f.max() - f.min())
             center = float(0.5 * (f.min() + f.max()))
+            self.active_view_index = 0
+            self.active_view_combo.setCurrentIndex(0)
             self.region.setRegion([center - 0.05 * span, center + 0.05 * span])
+            self.secondary_region.setRegion(self.region.getRegion())
+            self.secondary_plot.setXRange(*self.plot.viewRange()[0], padding=0)
             self.clear_fit_overlay()
             self.status("Loaded NPZ file.")
         except Exception as exc:
@@ -481,7 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def selected_region_xy(self) -> tuple[np.ndarray, np.ndarray]:
         if self.frequency is None or self.amplitude is None:
             raise ValueError("No data loaded.")
-        lo, hi = self.region.getRegion()
+        lo, hi = self._view_region().getRegion()
         if hi < lo:
             lo, hi = hi, lo
         mask = (self.frequency >= lo) & (self.frequency <= hi)
@@ -490,7 +580,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.frequency[mask], self.amplitude[mask]
 
     def selected_region_bounds(self) -> tuple[float, float]:
-        lo, hi = self.region.getRegion()
+        lo, hi = self._view_region().getRegion()
         if hi < lo:
             lo, hi = hi, lo
         return float(lo), float(hi)
@@ -515,10 +605,17 @@ class MainWindow(QtWidgets.QMainWindow):
             clip_negative=bool(self.clip_check.isChecked()),
             smooth=bool(self.smooth_check.isChecked()),
             sg_window=None if sg_win == 0 else int(sg_win),
+            sg_poly=self._restored_template_config.sg_poly
+            if self._restored_template_config
+            else TemplateBuildConfig().sg_poly,
             resample_factor=int(self.resample_spin.value()),
             edge_mode=self.edge_mode_combo.currentText(),
             edge_width_hz=float(self.edge_width_spin.value()),
             edge_fraction=float(self.edge_fraction_spin.value()),
+            left_edge_points=int(self.edge_side_spins["left_edge_points"].value()),
+            right_edge_points=int(self.edge_side_spins["right_edge_points"].value()),
+            left_tail_width_hz=float(self.edge_side_spins["left_tail_width_hz"].value()),
+            right_tail_width_hz=float(self.edge_side_spins["right_tail_width_hz"].value()),
         )
 
     def _fit_config_from_widgets(
@@ -533,6 +630,11 @@ class MainWindow(QtWidgets.QMainWindow):
             common_scale=bool(self.common_scale_check.isChecked()),
             loss=self.loss_combo.currentText(),
             min_separation=float(self.min_sep_spin.value()),
+            separation_penalty_strength=(
+                self._restored_fit_config.separation_penalty_strength
+                if self._restored_fit_config
+                else FitConfig().separation_penalty_strength
+            ),
         )
 
     def _uncertainty_config_from_widgets(self) -> UncertaintyConfig:
@@ -553,6 +655,9 @@ class MainWindow(QtWidgets.QMainWindow):
             config = self._template_config_from_widgets()
             payload = {"x": x, "y": y, **asdict(config)}
             self._pending_template_config = config
+            self._pending_template_region = self.selected_region_bounds()
+            self._pending_template_harmonic = self.active_harmonic()
+            self._pending_template_harmonic_expression = self.active_harmonic_expression()
             self.set_busy(True, "Building template...")
             self.worker = AnalysisWorker("build_template", payload)
             self.worker.progress.connect(self.status)
@@ -565,9 +670,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def finish_build_template(self, result: dict[str, Any]) -> None:
         self.set_busy(False, "Template built.")
         tpl = result["template_nominal"]
-        lo, hi = self.selected_region_bounds()
+        lo, hi = self._pending_template_region
         entry = {
             "name": tpl.name,
+            "harmonic": self._pending_template_harmonic,
+            "harmonic_expression": self._pending_template_harmonic_expression,
+            "combination": None,
+            "source_leaf_ids": [len(self.templates)],
             "config": self._pending_template_config,
             "region_lo": lo,
             "region_hi": hi,
@@ -582,6 +691,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.templates.append(entry)
         self.template_combo.addItem(f"{len(self.templates)}: {tpl.name} ({len(result['templates'])} boot)")
         self.template_combo.setCurrentIndex(len(self.templates) - 1)
+        self.refresh_profile_sources()
         self.show_template_summary(entry)
         self.show_active_template()
 
@@ -625,6 +735,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Edge mode: {edge_info.get('edge_mode', 'none')}",
                 f"Edge width: {edge_info.get('edge_width_hz', 0.0):.9g} Hz",
                 f"Zero-anchor width: {edge_info.get('zero_anchor_width_hz', 0.0):.9g} Hz",
+                f"Left/right edge samples used: {edge_info.get('left_edge_points_used', 0)}, {edge_info.get('right_edge_points_used', 0)}",
+                f"Left/right zero distances: {edge_info.get('left_tail_width_hz', 0.0):.9g}, {edge_info.get('right_tail_width_hz', 0.0):.9g} Hz",
                 f"Edge baseline subtracted: {edge_info.get('edge_baseline_subtracted', 0.0):.9g}",
                 f"Left tail model: {edge_info.get('left_tail_model', 'none')}",
                 f"Right tail model: {edge_info.get('right_tail_model', 'none')}",
@@ -693,8 +805,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def start_fit_region(self) -> None:
         try:
             x, y = self.selected_region_xy()
-            tpl_entry = self.active_template_entry()
             n_peaks = int(self.n_peaks_spin.value())
+            component_ids = self._fit_component_template_ids(n_peaks)
+            if component_ids is None:
+                tpl_entry = transfer_template_entry(self.active_template_entry(), self.active_harmonic())
+                entries = None
+            else:
+                cache = {
+                    idx: transfer_template_entry(self.templates[idx], self.active_harmonic())
+                    for idx in set(component_ids)
+                }
+                entries = [cache[idx] for idx in component_ids]
+                tpl_entry = entries[0]
             init_mus = self.parse_init_mus()
             mu_bounds = self.parse_mu_bounds_for_fit(n_peaks=n_peaks, init_mus=init_mus)
             fit_config = self._fit_config_from_widgets(n_peaks, init_mus, mu_bounds)
@@ -704,13 +826,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 "y": y,
                 "template": tpl_entry["template"],
                 "template_bank": tpl_entry["template_bank"],
+                "component_templates": [e["template"] for e in entries] if entries is not None else None,
+                "component_template_banks": [e["template_bank"] for e in entries] if entries is not None else None,
                 **asdict(fit_config),
                 **asdict(unc_config),
             }
             self._pending_fit_config = fit_config
             self._pending_uncertainty_config = unc_config
-            self._pending_template_index = self.template_combo.currentIndex()
+            self._pending_template_index = component_ids[0] if component_ids else self.template_combo.currentIndex()
+            self._pending_component_template_ids = component_ids
+            self._pending_component_entries = entries
             self._pending_region_hz = self.selected_region_bounds()
+            self._pending_target_harmonic = self.active_harmonic()
+            self._pending_target_harmonic_expression = self.active_harmonic_expression()
+            self._pending_fit_view = self.active_view_index
             self.set_busy(True, "Fitting selected region...")
             self.worker = AnalysisWorker("fit_region", payload)
             self.worker.progress.connect(self.status)
@@ -722,23 +851,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def finish_fit_region(self, result: dict[str, Any]) -> None:
         self.set_busy(False, "Fit finished.")
+        result["target_harmonic_expression"] = self._pending_target_harmonic_expression
+        result["component_template_ids"] = self._pending_component_template_ids
+        result["component_template_entries"] = self._pending_component_entries
         self.last_result = result
         self.last_fit_config = self._pending_fit_config
         self.last_uncertainty_config = self._pending_uncertainty_config
         self.last_template_index = self._pending_template_index
         self.last_region_hz = self._pending_region_hz
+        self.last_target_harmonic = self._pending_target_harmonic
+        self.last_view_index = self._pending_fit_view
         self.plot_fit_overlay(result["fit"])
         self.fill_results_table(result)
         self.fill_fit_summary(result)
+        self.control_tabs.setCurrentIndex(4)
         if self.auto_store_check.isChecked():
             self.store_current_fit()
             self.fit_label_edit.setText(self.next_default_fit_label())
 
     def clear_fit_overlay(self) -> None:
         self.fit_curve.setData([], [])
+        self.secondary_fit_curve.setData([], [])
         self.background_curve.setData([], [])
+        self.secondary_background_curve.setData([], [])
         for c in self.component_curves:
-            self.plot.removeItem(c)
+            self._overlay_plot.removeItem(c)
         self.component_curves = []
         self.lower_curve.setData([], [])
         self.lower_curve_2.setData([], [])
@@ -746,12 +883,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def plot_fit_overlay(self, fit: dict[str, Any]) -> None:
         self.clear_fit_overlay()
         x = fit["x"]
-        self.fit_curve.setData(x, fit["y_model"])
-        self.background_curve.setData(x, fit["background"])
+        self._overlay_plot = self._view_plot(self.last_view_index)
+        fit_curve = self.fit_curve if self.last_view_index == 0 else self.secondary_fit_curve
+        background_curve = self.background_curve if self.last_view_index == 0 else self.secondary_background_curve
+        if self.last_view_index == 1:
+            self.show_secondary_check.setChecked(True)
+        fit_curve.setData(x, fit["y_model"])
+        background_curve.setData(x, fit["background"])
         colors = ["g", "y", "c", "m", "w", "b"]
         for k, comp in enumerate(fit["components"]):
             pen = pg.mkPen(colors[k % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine)
-            curve = self.plot.plot(x, comp + fit["background"], pen=pen, name=f"component {k}")
+            curve = self._overlay_plot.plot(x, comp + fit["background"], pen=pen, name=f"component {k}")
             self.component_curves.append(curve)
 
         self.lower_plot.setLabel("bottom", "Frequency", units="Hz")
@@ -792,7 +934,9 @@ class MainWindow(QtWidgets.QMainWindow):
             mus = fit["info"]["mus"]
             areas = fit["info"]["areas"]
             scales = fit["info"]["scales"]
-            widths = component_widths_from_params(fit["params"], fit["param_names"], fit["template"], fit["n_peaks"])
+            widths = component_widths_from_params(
+                fit["params"], fit["param_names"], fit["template"], fit["n_peaks"], fit.get("component_templates")
+            )
 
             boot_mu = boot["summary"].get(mu_name) if boot else None
             tpl_mu = tpl_prop["summary"].get(mu_name) if tpl_prop else None
@@ -800,7 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tpl_w = tpl_prop["width_summary"].get(width_name) if tpl_prop else None
 
             values = [
-                str(k),
+                f"C{k + 1}",
                 self.fmt(mus[k], 10),
                 self.fmt_interval(boot_mu, 10),
                 self.fmt_interval(tpl_mu, 10),
@@ -816,6 +960,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
             for col, text in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(text)
+                if fit.get("component_templates"):
+                    item.setToolTip(f"C{k + 1}: {fit['component_templates'][k].name}")
                 self.results_table.setItem(k, col, item)
         self.results_table.resizeColumnsToContents()
 
@@ -841,9 +987,12 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append("Use bootstrap/template propagation as primary uncertainty.")
         lines.append("")
 
-        widths = component_widths_from_params(fit["params"], fit["param_names"], fit["template"], fit["n_peaks"])
+        widths = component_widths_from_params(
+            fit["params"], fit["param_names"], fit["template"], fit["n_peaks"], fit.get("component_templates")
+        )
         for k in range(fit["n_peaks"]):
-            lines.append(f"Peak {k}")
+            tpl = (fit.get("component_templates") or [fit["template"]] * fit["n_peaks"])[k]
+            lines.append(f"Peak C{k + 1} — template: {tpl.name}")
             lines.append(f"  COG fit       = {fit['info']['mus'][k]:.12g} Hz")
             lines.append(f"  area fit      = {fit['info']['areas'][k]:.12g}")
             lines.append(f"  scale fit     = {fit['info']['scales'][k]:.12g}")
@@ -915,7 +1064,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         label = self.fit_label_edit.text().strip() or self.next_default_fit_label()
         notes = ""
-        rows = make_export_rows_for_result(self.last_result, label=label, template_registry=self.templates, notes=notes)
+        rows = make_export_rows_for_result(
+            self.last_result, label=label, template_registry=self._registry_for_result(self.last_result), notes=notes
+        )
         record = {
             "label": label,
             "notes": notes,
@@ -925,11 +1076,22 @@ class MainWindow(QtWidgets.QMainWindow):
             "uncertainty_config": self.last_uncertainty_config,
             "template_index": self.last_template_index,
             "region_hz": self.last_region_hz,
+            "target_harmonic": self.last_target_harmonic,
+            "view_index": self.last_view_index,
         }
         self.fit_records.append(record)
         self.refresh_history_table(select_last=True)
         self.tabs.setCurrentIndex(1)
         self.status(f"Stored fit as '{label}'.")
+
+    def _registry_for_result(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        if result.get("component_template_entries") is not None:
+            return [*result["component_template_entries"], *self.templates]
+        if 0 <= self.last_template_index < len(self.templates):
+            entry = transfer_template_entry(self.templates[self.last_template_index], self.last_target_harmonic)
+            entry["template"] = result["fit"]["template"]
+            return [entry, *self.templates]
+        return self.templates
 
     def _current_form_state(self) -> FormState:
         n_peaks = int(self.n_peaks_spin.value())
@@ -942,22 +1104,48 @@ class MainWindow(QtWidgets.QMainWindow):
             auto_store=bool(self.auto_store_check.isChecked()),
             uncertainty=self._uncertainty_config_from_widgets(),
             region_hz=self.selected_region_bounds(),
+            active_template_id=self.template_combo.currentIndex() if self.templates else None,
+            view_state=self._view_state_for_session(),
         )
 
     def _session_from_state(self) -> Session:
         if self.current_file is None:
             raise ValueError("No data file loaded.")
         sha256 = _sha256_of(self.current_file)
+        if self._data_sha256 is not None and sha256 != self._data_sha256:
+            raise ValueError("The loaded NPZ changed on disk. Reload it before saving a reproducible configuration.")
         templates = [
             TemplateRecord(
                 id=idx,
                 region_hz=(entry["region_lo"], entry["region_hi"]),
                 config=entry["config"],
                 verify=_template_verify_from_entry(entry),
+                harmonic=float(entry.get("harmonic", 1.0)),
+                harmonic_expression=entry.get("harmonic_expression", ""),
+                combination=entry.get("combination"),
             )
             for idx, entry in enumerate(self.templates)
         ]
-        for rec in self.fit_records:
+        records = list(self.fit_records)
+        if self.last_result is not None and not any(rec["result"] is self.last_result for rec in records):
+            label = self.fit_label_edit.text().strip() or self.next_default_fit_label()
+            records.append(
+                {
+                    "label": label,
+                    "notes": "",
+                    "template_index": self.last_template_index,
+                    "result": self.last_result,
+                    "region_hz": self.last_region_hz,
+                    "target_harmonic": self.last_target_harmonic,
+                    "view_index": self.last_view_index,
+                    "fit_config": self.last_fit_config,
+                    "uncertainty_config": self.last_uncertainty_config,
+                    "rows": make_export_rows_for_result(
+                        self.last_result, label=label, template_registry=self._registry_for_result(self.last_result)
+                    ),
+                }
+            )
+        for rec in records:
             if rec["fit_config"] is None or rec["uncertainty_config"] is None:
                 raise ValueError(f"Fit '{rec['label']}' has no recorded fit configuration; cannot save session.")
         fits = [
@@ -969,15 +1157,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 fit_config=rec["fit_config"],
                 uncertainty_config=rec["uncertainty_config"],
                 verify_rows=rec["rows"],
+                target_harmonic=float(rec.get("target_harmonic", 1.0)),
+                view_index=int(rec.get("view_index", 0)),
+                component_template_ids=rec.get("result", {}).get("component_template_ids"),
+                target_harmonic_expression=rec.get("result", {}).get("target_harmonic_expression", ""),
             )
-            for rec in self.fit_records
+            for rec in records
         ]
         return Session(
             schema_version=SCHEMA_VERSION,
             ssa_version=SSA_VERSION,
             created_utc=datetime.now(timezone.utc).isoformat(),
             input=InputRef(
-                path=str(self.current_file),
+                path=str(self.current_file.resolve()),
                 sha256=sha256,
                 frequency_key=self._frequency_key,
                 amplitude_key=self._amplitude_key,
@@ -985,27 +1177,62 @@ class MainWindow(QtWidgets.QMainWindow):
             form_state=self._current_form_state(),
             templates=templates,
             fits=fits,
+            comparisons=[run["record"] for run in self.comparison_runs],
         )
+
+    def _choose_output_parent(self) -> None:
+        parent = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose output parent folder")
+        if parent:
+            self.output_parent_edit.setText(parent)
+
+    def _save_run_bundle(self) -> Path | None:
+        session = self._session_from_state()
+        parent = self.output_parent_edit.text().strip()
+        if not parent:
+            self._choose_output_parent()
+            parent = self.output_parent_edit.text().strip()
+        if not parent:
+            return None
+        label = self.bundle_label_edit.text().strip()
+        state = _to_toml_value(asdict(session))
+        state.pop("created_utc", None)
+        signature = hashlib.sha256(
+            json.dumps(
+                {
+                    "parent": str(Path(parent).expanduser().resolve()),
+                    "label": label,
+                    "session": state,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        if self._bundle_dir is None or not self._bundle_dir.exists() or signature != self._bundle_signature:
+            out = create_run_directory(parent, "SchottkySA", label)
+            _save_session(out / "config.toml", session)
+            rows = [row for fit in session.fits for row in fit.verify_rows]
+            if rows:
+                export_history_rows(rows, out / "fit_history.csv", source_file=self.current_file)
+            if self.comparison_runs:
+                comparison_rows = [row for run in self.comparison_runs for row in run["record"].verify_rows]
+                export_history_rows(comparison_rows, out / "profile_comparisons.csv", source_file=self.current_file)
+            if self.last_result is not None:
+                _export_current_overlay_npz(self.last_result["fit"], out / "current_fit_overlay.npz")
+            self._bundle_dir, self._bundle_signature = out, signature
+        self.bundle_path_label.setText(str(self._bundle_dir))
+        return self._bundle_dir
 
     def save_session(self) -> None:
         try:
-            session = self._session_from_state()
-        except Exception as exc:
-            self.show_error(str(exc))
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save session", "session.toml", "TOML (*.toml)")
-        if not path:
-            return
-        if not path.lower().endswith(".toml"):
-            path += ".toml"
-        try:
-            _save_session(path, session)
-            self.status(f"Saved session to {path}")
+            out = self._save_run_bundle()
+            if out is not None:
+                self.status(f"Saved configuration and available tables to {out}")
         except Exception as exc:
             self.show_error(f"Save failed:\n{exc}")
 
     def load_session(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load session", "", "TOML (*.toml);;All files (*)")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Replay saved configuration", "", "TOML (*.toml);;All files (*)"
+        )
         if not path:
             return
         if self.templates or self.fit_records:
@@ -1021,9 +1248,14 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self.show_error(f"Could not read session file:\n{exc}")
             return
+        override = None
+        if not Path(session.input.path).is_file():
+            override, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Locate original NPZ input", "", "NPZ (*.npz)")
+            if not override:
+                return
         self.set_busy(True, "Replaying session...")
         self._loading_session = session
-        self.worker = SessionReplayWorker(session)
+        self.worker = SessionReplayWorker(session, data_path_override=override)
         self.worker.progress.connect(self.status)
         self.worker.finished_ok.connect(self._finish_load_session)
         self.worker.failed.connect(self.worker_failed)
@@ -1037,6 +1269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frequency = report.frequency
         self.amplitude = report.amplitude
         self.current_file = report.data_path
+        self._data_sha256 = _sha256_of(report.data_path)
         self._frequency_key = session.input.frequency_key
         self._amplitude_key = session.input.amplitude_key
         self.file_label.setText(
@@ -1049,6 +1282,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot.setYRange(float(np.nanmin(self.amplitude)), float(np.nanmax(self.amplitude)), padding=0.05)
 
         self.templates = report.templates
+        self.comparison_runs = report.comparisons
+        self._clear_profile_displays()
         self.template_combo.clear()
         for idx, entry in enumerate(self.templates):
             self.template_combo.addItem(f"{idx + 1}: {entry['name']} ({len(entry['template_bank'])} boot)")
@@ -1058,6 +1293,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_records = report.fits
         self.refresh_history_table()
         self.clear_fit_overlay()
+        self.last_result = None
+        self.last_fit_config = None
+        self.last_uncertainty_config = None
         if self.fit_records:
             last_record = self.fit_records[-1]
             last_result = last_record["result"]
@@ -1066,9 +1304,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.last_uncertainty_config = last_record["uncertainty_config"]
             self.last_template_index = last_record["template_index"]
             self.last_region_hz = last_record["region_hz"]
+            self.last_target_harmonic = last_record.get("target_harmonic", 1.0)
+            self.last_view_index = last_record.get("view_index", 0)
             self.plot_fit_overlay(last_result["fit"])
 
         fs = session.form_state
+        self._restored_template_config, self._restored_fit_config = fs.template, fs.fit
+        if fs.active_template_id is not None:
+            if not 0 <= fs.active_template_id < len(self.templates):
+                raise ValueError("Saved active template id is not in this session")
+            self.template_combo.setCurrentIndex(fs.active_template_id)
         self.template_name_edit.setText(fs.template.name)
         self.template_boot_spin.setValue(fs.template.n_template_boot)
         self.resample_spin.setValue(fs.template.resample_factor)
@@ -1078,6 +1323,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edge_mode_combo.setCurrentText(fs.template.edge_mode)
         self.edge_width_spin.setValue(fs.template.edge_width_hz)
         self.edge_fraction_spin.setValue(fs.template.edge_fraction)
+        for field, widget in self.edge_side_spins.items():
+            widget.setValue(getattr(fs.template, field))
 
         self.fit_label_edit.setText(fs.fit_label)
         self.n_peaks_spin.setValue(fs.fit.n_peaks)
@@ -1097,6 +1344,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpl_prop_spin.setValue(fs.uncertainty.n_template_prop)
         self.seed_spin.setValue(fs.uncertainty.random_seed)
         self.region.setRegion(list(fs.region_hz))
+        self._restore_profile_view_state(fs.view_state)
+        if self.comparison_runs:
+            self.show_profile_comparison(self.comparison_runs[-1]["directions"])
+        self.control_tabs.setCurrentIndex(4)
 
         lines = [f"Loaded session: {len(self.templates)} template(s), {len(self.fit_records)} fit(s)."]
         lines.extend(f"WARNING: {w}" for w in report.input_warnings)
@@ -1110,11 +1361,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if report.ok:
             self.status("Session loaded and verified.")
         else:
-            self.status(f"Session loaded with {len(report.mismatches)} mismatch(es) — see Summary tab.")
+            self.status("Session replay requires review — see Summary tab.")
             QtWidgets.QMessageBox.warning(
                 self,
                 "Session verification",
-                f"{len(report.mismatches)} value(s) did not reproduce within tolerance. See the Summary tab for details.",
+                f"{len(report.input_warnings)} input warning(s); {len(report.mismatches)} numerical difference(s). "
+                "See the Summary tab for details.",
             )
 
     def refresh_history_table(self, select_last: bool = False) -> None:
@@ -1198,8 +1450,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         rec_idx, _ = data
         if 0 <= rec_idx < len(self.fit_records):
-            result = self.fit_records[rec_idx]["result"]
+            record = self.fit_records[rec_idx]
+            result = record["result"]
+            previous_view = self.last_view_index
+            self.last_view_index = record.get("view_index", 0)
             self.plot_fit_overlay(result["fit"])
+            self.last_view_index = previous_view
 
     def selected_history_rows(self) -> list[dict[str, Any]]:
         selected = self.history_table.selectionModel().selectedRows()
@@ -1269,40 +1525,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status("Deleted selected fit record(s).")
 
     def export_current_overlay_npz(self) -> None:
-        """Export the current fit overlay/residual/components to NPZ for independent plotting."""
+        """Save overlay together with its reproducible configuration and tables."""
         if not self.last_result:
             self.show_error("No current fit to export.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export current fit overlay",
-            "schottky_current_fit_overlay.npz",
-            "NPZ (*.npz);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            _export_current_overlay_npz(self.last_result["fit"], path)
-            self.status(f"Exported current fit overlay to {path}")
-        except Exception as exc:
-            self.show_error(f"Export failed:\n{exc}")
+        self.save_session()
 
     def export_history(self) -> None:
-        rows = self.all_history_rows()
-        if not rows:
-            self.show_error("No stored fits to export.")
-            return
-        path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export fit history",
-            "schottky_fit_history.tsv",
-            "TSV (*.tsv);;CSV (*.csv);;JSON (*.json);;Excel XLSX (*.xlsx);;LibreOffice ODS (*.ods)",
-        )
-        if not path:
-            return
         try:
-            export_history_rows(rows, path, source_file=self.current_file)
-            self.status(f"Exported fit history to {path}")
+            out = self._save_run_bundle()
+            if out is None:
+                return
+            rows = [row for fit in self._session_from_state().fits for row in fit.verify_rows]
+            if not rows:
+                self.show_error("No fitted results to export. Configuration was saved.")
+                return
+            extension = self.table_format_combo.currentText().lower()
+            path = out / f"fit_history.{extension}"
+            if not path.exists():
+                export_history_rows(rows, path, source_file=self.current_file)
+            self.status(f"Configuration and {extension.upper()} tables saved to {out}")
         except Exception as exc:
             self.show_error(f"Export failed:\n{exc}")
 
@@ -1321,8 +1563,37 @@ class MainWindow(QtWidgets.QMainWindow):
             self.delete_selected_btn,
             self.save_session_action,
             self.load_session_action,
+            self.save_config_btn,
+            self.replay_config_btn,
+            self.output_browse_btn,
+            self.combine_profiles_btn,
+            self.compare_profiles_btn,
+            self.preview_profiles_btn,
+            self.pick_components_check,
+            self.draw_components_btn,
+            self.remove_component_btn,
+            self.clear_components_btn,
+            self.fit_components_btn,
+            self.picker_halfwidth_spin,
+            self.picker_component_combo,
+            self.n_peaks_spin,
+            self.init_mus_edit,
+            self.mu_ranges_edit,
+            self.mu_range_halfwidth_spin,
+            self.min_sep_spin,
+            *self.edge_side_spins.values(),
+            self.use_component_templates_check,
+            self.component_template_combo,
+            self.same_template_btn,
         ]:
             w.setEnabled(not busy)
+        for markers in self.component_markers:
+            for marker in markers:
+                marker["line"].setMovable(not busy)
+                if marker["region"] is not None:
+                    marker["region"].setMovable(not busy)
+        if not busy:
+            self._sync_component_template_choices()
         self.status(message or ("Busy..." if busy else "Ready"))
 
     def worker_failed(self, tb: str) -> None:
@@ -1332,7 +1603,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def status(self, msg: str) -> None:
         self.status_label.setText(msg)
         self.statusBar().showMessage(msg)
+        self.statusBar().showMessage(msg)
 
     def show_error(self, msg: str) -> None:
         QtWidgets.QMessageBox.critical(self, "Error", msg)
         self.status("Error")
+
+    def closeEvent(self, event: Any) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)

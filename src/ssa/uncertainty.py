@@ -1,16 +1,7 @@
-"""Uncertainty propagation: residual bootstrap, template-shape propagation,
-component-level derived quantities, and fit quality flags.
+"""Target residual resampling, reference-shape propagation and joint observables.
 
-The residual bootstrap and template-shape propagation (see
-``docs/SCIENTIFIC_METHOD.md`` section 6) are the primary, on-by-default
-uncertainty methods. ``quality_flag_for_fit`` also checks the *reliability*
-of the bootstrap/template-propagation samples themselves (replicate-failure
-rate, and whether a component's combined centroid sigma rests on only one of
-the two independent sources) -- see its docstring.
-
-Covariance rescaling, quality-flag thresholds, and the two width
-definitions reported per component are project conventions documented in
-``docs/SCIENTIFIC_METHOD.md``, not changed by this module.
+Quality flags report both fit diagnostics and returned uncertainty-sample counts.
+Widths use either the second moment or the central 68% quantile interval.
 """
 
 from __future__ import annotations
@@ -31,7 +22,7 @@ from ssa.constants import (
     QUALITY_RED_CHI2_BAD,
     QUALITY_RED_CHI2_WARN,
 )
-from ssa.fitting import fit_template_region
+from ssa.fitting import fit_template_region, resolve_component_templates, templates_from_fit
 from ssa.preprocessing import circular_block_resample, estimate_block_size_from_residuals, summarize_distribution
 from ssa.templates import PeakTemplate, get_template_std
 
@@ -71,24 +62,34 @@ def get_scale_values_from_params(params: np.ndarray, param_names: list[str], n_p
 
 
 def component_widths_from_params(
-    params: np.ndarray, param_names: list[str], template: PeakTemplate, n_peaks: int
+    params: np.ndarray,
+    param_names: list[str],
+    template: PeakTemplate,
+    n_peaks: int,
+    component_templates: list[PeakTemplate] | None = None,
 ) -> np.ndarray:
     """Component RMS widths (second-moment, scale x template std). Distinct
     from the quantile-based sigma68 in :func:`component_quantiles_from_fit`;
     the two generally differ for a non-Gaussian template -- see
     docs/SCIENTIFIC_METHOD.md section 6."""
     scales = get_scale_values_from_params(params, param_names, n_peaks)
-    return scales * get_template_std(template)
+    if component_templates is None:
+        return scales * get_template_std(template)
+    templates = resolve_component_templates(template, n_peaks, component_templates)
+    return scales * np.asarray([get_template_std(t) for t in templates])
 
 
 def component_quantiles_from_fit(fit: dict[str, Any]) -> list[dict[str, float]]:
     """Return q16/q50/q84 and sigma68 for each component in the same frequency units."""
     tpl = fit["template"]
-    q16_t, q50_t, q84_t = tpl.quantile([0.16, 0.50, 0.84])
     rows = []
-    widths = component_widths_from_params(fit["params"], fit["param_names"], tpl, fit["n_peaks"])
+    widths = component_widths_from_params(
+        fit["params"], fit["param_names"], tpl, fit["n_peaks"], fit.get("component_templates")
+    )
     mus_areas_scales = zip(fit["info"]["mus"], fit["info"]["areas"], fit["info"]["scales"], strict=False)
+    templates = templates_from_fit(fit)
     for k, (mu, _area, scale) in enumerate(mus_areas_scales):
+        q16_t, q50_t, q84_t = templates[k].quantile([0.16, 0.50, 0.84])
         q16 = float(mu + scale * q16_t)
         q50 = float(mu + scale * q50_t)
         q84 = float(mu + scale * q84_t)
@@ -135,9 +136,8 @@ def bootstrap_fit(
 ) -> dict[str, Any]:
     """Residual block-bootstrap for fitted template parameters.
 
-    Note: this function's own default is ``n_boot=300``, but the GUI always
-    passes its own, separately named default of ``1000`` (its "Bootstrap
-    samples" spin box) -- see ``ssa.constants.DEFAULT_FIT_BOOTSTRAP_N_BOOT_GUI``.
+    The API and GUI have separate replicate defaults in ``ssa.constants``.
+    Set ``n_boot`` explicitly when reproducing an analysis.
     """
     if rng is None:
         rng = np.random.default_rng(DEFAULT_RANDOM_SEED)
@@ -161,6 +161,7 @@ def bootstrap_fit(
                 fit["x"],
                 yb,
                 template=fit["template"],
+                component_templates=fit.get("component_templates"),
                 n_peaks=fit["n_peaks"],
                 sigma=fit["sigma_arr"],
                 background_order=fit["background_order"],
@@ -182,7 +183,12 @@ def bootstrap_fit(
 
     width_samples = (
         np.asarray(
-            [component_widths_from_params(p, fit["param_names"], fit["template"], fit["n_peaks"]) for p in params_arr]
+            [
+                component_widths_from_params(
+                    p, fit["param_names"], fit["template"], fit["n_peaks"], fit.get("component_templates")
+                )
+                for p in params_arr
+            ]
         )
         if len(params_arr)
         else np.empty((0, fit["n_peaks"]))
@@ -204,9 +210,7 @@ def bootstrap_fit(
         "tau_int": tau_int,
         "lags": lags,
         "acf": acf,
-        # Attempted replicate count, distinct from len(params) (= valid
-        # count): lets quality_flag_for_fit detect a high replicate-failure
-        # rate even when the absolute valid count still looks large.
+        # Quality flags use attempted and returned counts to detect lost draws.
         "n_requested": n_requested,
     }
 
@@ -216,8 +220,17 @@ def propagate_template_uncertainty_to_target_fit(
     template_bank: list[PeakTemplate],
     n_draws: int | None = DEFAULT_N_TEMPLATE_PROPAGATION_DRAWS,
     random_seed: int = DEFAULT_RANDOM_SEED,
+    component_template_banks: list[list[PeakTemplate]] | None = None,
 ) -> dict[str, Any]:
-    """Refit a target region with bootstrap templates to estimate template-shape uncertainty."""
+    """Refit with bootstrap profiles. Repeated banks share a draw per replicate.
+
+    Distinct banks are sampled independently: this is a stated nuisance model,
+    not inferred reference-data independence. Missing banks are explicitly flagged.
+    """
+    if component_template_banks is not None:
+        return _propagate_component_template_banks(nominal_fit, component_template_banks, n_draws, random_seed)
+    if len({id(t) for t in templates_from_fit(nominal_fit)}) > 1:
+        raise ValueError("For mixed-template fits, supply component_template_banks for all components.")
     rng = np.random.default_rng(random_seed)
     if not template_bank:
         return {
@@ -278,9 +291,92 @@ def propagate_template_uncertainty_to_target_fit(
         "width_samples": width_arr,
         "width_summary": width_summary,
         "selected_template_indices": used_template_indices,
-        # Attempted count (len(selected)), distinct from len(params) (valid
-        # count) -- see the matching comment in bootstrap_fit.
+        # Retain the requested count even when some refits fail.
         "n_requested": int(len(selected)),
+    }
+
+
+def _propagate_component_template_banks(
+    fit: dict[str, Any],
+    banks: list[list[PeakTemplate]],
+    n_draws: int | None,
+    seed: int,
+) -> dict[str, Any]:
+    """Joint reference-shape draws with fixed component identities."""
+    n = fit["n_peaks"]
+    if len(banks) != n:
+        raise ValueError("Provide one template bank per component (an empty bank means fixed nominal).")
+    nominal = templates_from_fit(fit)
+    # Object identity matters: GUI and replay reuse the same bank list for a
+    # repeated source. Distinct names alone cannot establish shared provenance.
+    unique = {}
+    groups = []
+    for bank in banks:
+        key = id(bank)
+        if key not in unique:
+            unique[key] = len(unique)
+        groups.append(unique[key])
+    group_banks = {group: banks[k] for k, group in enumerate(groups)}
+    nonempty = {group: bank for group, bank in group_banks.items() if bank}
+    missing = [k for k, bank in enumerate(banks) if not bank]
+    rng = np.random.default_rng(seed)
+    count = (
+        (int(n_draws) if n_draws is not None and n_draws > 0 else max((len(b) for b in nonempty.values()), default=0))
+        if nonempty
+        else 0
+    )
+    if len(nonempty) == 1:
+        count = min(count, len(next(iter(nonempty.values()))))
+    plan = {}
+    for group, bank in nonempty.items():
+        if len(nonempty) == 1 and count == len(bank):
+            plan[group] = np.arange(count)
+        else:
+            plan[group] = rng.choice(len(bank), size=count, replace=count > len(bank))
+    params, widths, used = [], [], []
+    for replicate in range(count):
+        indices = [int(plan[group][replicate]) if group in plan else -1 for group in groups]
+        templates = [banks[k][idx] if idx >= 0 else nominal[k] for k, idx in enumerate(indices)]
+        try:
+            varied = fit_template_region(
+                fit["x"],
+                fit["y"],
+                templates[0],
+                n,
+                component_templates=templates,
+                sigma=fit["sigma_arr"],
+                background_order=fit["background_order"],
+                allow_scale=fit["allow_scale"],
+                common_scale=fit["common_scale"],
+                p0_override=fit["params"],
+                loss=fit["loss"],
+                max_nfev=DEFAULT_FIT_BOOTSTRAP_MAX_NFEV,
+                min_separation=float(fit.get("min_separation", 0)),
+                separation_penalty_strength=float(fit.get("separation_penalty_strength", 1e6)),
+                mu_bounds=fit.get("mu_bounds"),
+            )
+            params.append(varied["params"])
+            widths.append(
+                component_widths_from_params(varied["params"], varied["param_names"], templates[0], n, templates)
+            )
+            used.append(indices)
+        except Exception:
+            continue
+    samples = np.asarray(params, dtype=float).reshape((-1, len(fit["params"])))
+    width_array = np.asarray(widths, dtype=float).reshape((-1, n))
+    return {
+        "params": samples,
+        "param_names": fit["param_names"],
+        "summary": summarize_sample_dict(transformed_parameter_samples(samples, fit["param_names"])),
+        "width_samples": width_array,
+        "width_summary": {f"width_{k}": summarize_distribution(width_array[:, k]) for k in range(n)}
+        if len(width_array)
+        else {},
+        "selected_template_indices": used,
+        "component_template_groups": groups,
+        "missing_template_bank_components": missing,
+        "independent_template_banks_assumed": len(nonempty) > 1,
+        "n_requested": count,
     }
 
 
@@ -423,6 +519,18 @@ def quality_flag_for_fit(
     Thresholds are this project's own convention, not a literature value.
     """
     flags = []
+    modes = {
+        getattr(t, "edge_info", {}).get("combination_bank_mode")
+        for t in (fit.get("component_templates") or [fit.get("template")])
+    }
+    if "source_sensitivity" in modes:
+        flags.append("combined_template_source_sensitivity")
+    if "independent" in modes:
+        flags.append("combined_template_independence_assumed")
+    if tpl_prop and tpl_prop.get("missing_template_bank_components"):
+        flags.append("component_template_bank_missing")
+    if tpl_prop and tpl_prop.get("independent_template_banks_assumed"):
+        flags.append("independent_template_banks_assumed")
     red = float(fit.get("red_chi2", np.nan))
     success = bool(fit.get("success", False))
     if not success:

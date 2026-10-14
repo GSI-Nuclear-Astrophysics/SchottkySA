@@ -21,8 +21,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # PySide6's "offscreen" platform plugin still needs a handful of
-      # system libraries that ubuntu-latest doesn't ship by default.
+      # Headless Qt still needs its runtime libraries.
       - name: Install Qt runtime dependencies
         run: |
           sudo apt-get update
@@ -49,10 +48,14 @@ jobs:
       - name: Validate distribution metadata (twine check)
         run: twine check dist/*
 
+      - name: Inspect distribution contents
+        run: python scripts/check_release.py dist/*
+
       - name: Install built wheel into a fresh venv and smoke test
         run: |
           python -m venv /tmp/fresh_venv
           source /tmp/fresh_venv/bin/activate
           pip install "$(ls dist/*.whl)[gui]"
           python -c "import ssa; import ssa.gui.main_window; print('ssa', ssa.__version__)"
+          cd /tmp
           ssa --version

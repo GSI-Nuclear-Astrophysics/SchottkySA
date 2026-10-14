@@ -214,3 +214,141 @@ def test_apply_replay_report_populates_gui_state(main_window, tmp_path):
     assert main_window.fit_label_edit.text() == session.form_state.fit_label
     assert main_window.n_peaks_spin.value() == session.form_state.fit.n_peaks
     assert "Loaded session" in main_window.summary_text.toPlainText() or main_window.status_label.text()
+
+
+def test_visible_bundle_controls_save_configuration_and_csv(main_window, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from ssa.session import load_session, replay_session
+
+    session, _ = _build_replay_fixture(tmp_path)
+    main_window._apply_replay_report(replay_session(session), session)
+    main_window.output_parent_edit.setText(str(tmp_path / "outputs"))
+    main_window.bundle_label_edit.setText("region 1")
+    assert main_window.save_config_btn.text() == "Save config + tables"
+    assert "Replay" in main_window.replay_config_btn.text()
+    errors = []
+    monkeypatch.setattr(main_window, "show_error", errors.append)
+    main_window.save_config_btn.click()
+    assert not errors
+    out = main_window._bundle_dir
+    assert isinstance(out, Path)
+    assert "_SchottkySA_CONFIG_region_1" in out.name
+    assert (out / "config.toml").exists()
+    assert (out / "fit_history.csv").exists()
+    assert (out / "current_fit_overlay.npz").exists()
+    assert not (out / "synthetic_reference_peak.npz").exists()
+    saved = load_session(out / "config.toml")
+    assert saved.form_state.active_template_id == 0
+    assert replay_session(saved).ok
+    # Save/export actions for the same state share one folder.
+    main_window.table_format_combo.setCurrentText("TSV")
+    main_window.export_history()
+    assert main_window._bundle_dir == out
+    assert (out / "fit_history.tsv").exists()
+    assert len(list((tmp_path / "outputs").iterdir())) == 1
+    # Different settings get a distinct snapshot instead of overwriting.
+    main_window.seed_spin.setValue(main_window.seed_spin.value() + 1)
+    main_window.save_session()
+    assert main_window._bundle_dir != out
+    assert main_window._bundle_dir.name == out.name + "_02"
+
+
+def test_unstored_fit_is_included_without_mutating_history(main_window, tmp_path):
+    from ssa.session import replay_session
+
+    session, _ = _build_replay_fixture(tmp_path)
+    main_window._apply_replay_report(replay_session(session), session)
+    main_window.fit_records = []
+    main_window.auto_store_check.setChecked(False)
+    saved = main_window._session_from_state()
+    assert len(saved.fits) == 1
+    assert len(main_window.fit_records) == 0
+    assert replay_session(saved).ok
+
+
+def test_input_changed_after_loading_cannot_be_saved(main_window, tmp_path):
+    from ssa.session import replay_session
+
+    session, path = _build_replay_fixture(tmp_path)
+    main_window._apply_replay_report(replay_session(session), session)
+    path.write_bytes(path.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="NPZ changed"):
+        main_window._session_from_state()
+
+
+def test_empty_replay_clears_previous_fit(main_window, tmp_path):
+    from ssa.session import replay_session
+
+    session, _ = _build_replay_fixture(tmp_path)
+    main_window._apply_replay_report(replay_session(session), session)
+    session.fits = []
+    session.templates = []
+    session.form_state.active_template_id = None
+    main_window._apply_replay_report(replay_session(session), session)
+    assert main_window.last_result is None
+    assert main_window.last_fit_config is None
+
+
+def test_run_directory_names_are_safe_and_unique(tmp_path):
+    from ssa.bundles import create_run_directory
+
+    first = create_run_directory(tmp_path, "SchottkySA", "../region/label")
+    second = create_run_directory(tmp_path, "SchottkySA", "../region/label")
+    assert first.parent == second.parent == tmp_path
+    assert second.name == first.name + "_02"
+
+
+def test_replay_button_runs_saved_configuration(main_window, tmp_path, monkeypatch):
+    from pyqtgraph.Qt import QtWidgets
+
+    from ssa.session import save_session
+
+    session, _ = _build_replay_fixture(tmp_path)
+    path = tmp_path / "config.toml"
+    save_session(path, session)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a: (str(path), "TOML"))
+    errors = []
+    monkeypatch.setattr(main_window, "show_error", errors.append)
+    main_window.replay_config_btn.click()
+    assert main_window.worker is not None
+    assert main_window.worker.wait(30000)
+    QtWidgets.QApplication.processEvents()
+    assert not errors
+    assert len(main_window.fit_records) == 1
+    assert len(main_window.templates) == 1
+    assert "verified" in main_window.status_label.text()
+    assert main_window.save_config_btn.isEnabled()
+
+
+def test_different_npz_clears_old_fit_session(main_window, tmp_path, monkeypatch):
+    import numpy as np
+    from pyqtgraph.Qt import QtWidgets
+
+    from ssa.session import replay_session
+
+    session, _ = _build_replay_fixture(tmp_path)
+    main_window._apply_replay_report(replay_session(session), session)
+    path = tmp_path / "different.npz"
+    np.savez(path, frequency=main_window.frequency, amplitude=main_window.amplitude * 2)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a: (str(path), "NPZ"))
+    main_window.load_npz()
+    assert not main_window.fit_records
+    assert not main_window.templates
+    assert main_window.last_result is None
+
+
+def test_save_and_replay_controls_visible_without_horizontal_scroll(main_window):
+    from pyqtgraph.Qt import QtWidgets
+
+    main_window.resize(1400, 900)
+    main_window.show()
+    QtWidgets.QApplication.processEvents()
+    scroll = main_window.findChild(QtWidgets.QScrollArea)
+    assert scroll is not None
+    viewport = scroll.viewport()
+    for button in (main_window.save_config_btn, main_window.replay_config_btn, main_window.output_browse_btn):
+        top_left = button.mapTo(viewport, button.rect().topLeft())
+        bottom_right = button.mapTo(viewport, button.rect().bottomRight())
+        assert viewport.rect().contains(top_left)
+        assert viewport.rect().contains(bottom_right)

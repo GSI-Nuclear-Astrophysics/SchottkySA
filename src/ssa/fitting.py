@@ -1,12 +1,7 @@
-"""Multi-component empirical-template least-squares fitting.
+"""Constrained least-squares fits with one empirical profile per component.
 
-See ``docs/SCIENTIFIC_METHOD.md`` section 4 for the parameter-vector layout,
-initial-guess heuristic, bounds/``mu_bounds``/``min_separation`` semantics,
-and diagnostic formulas. Without explicit ``mu_bounds``, the
-``find_peaks``-based initial-guess heuristic (:func:`guess_initial_mus`) can
-fail to resolve closely spaced ("contaminated") multi-peak regions -- supply
-explicit, ordered, non-overlapping per-component centroid search ranges via
-``mu_bounds`` for that case.
+Ordered centroid bounds preserve component identity when profiles overlap.
+Without explicit bounds, the peak-finding heuristic supplies initial guesses.
 """
 
 from __future__ import annotations
@@ -32,6 +27,8 @@ from ssa.templates import PeakTemplate
 
 __all__ = [
     "template_model",
+    "resolve_component_templates",
+    "templates_from_fit",
     "guess_initial_mus",
     "normalize_mu_bounds",
     "ensure_mu_bounds_respect_min_separation",
@@ -45,6 +42,23 @@ __all__ = [
 ]
 
 
+def resolve_component_templates(
+    template: PeakTemplate,
+    n_peaks: int,
+    component_templates: list[PeakTemplate] | None = None,
+) -> list[PeakTemplate]:
+    """Return one empirical profile per component; repeated objects are shared."""
+    if component_templates is None:
+        return [template] * n_peaks
+    if len(component_templates) != n_peaks or any(not isinstance(t, PeakTemplate) for t in component_templates):
+        raise FitConfigurationError("Provide exactly one valid template per fitted component.")
+    return list(component_templates)
+
+
+def templates_from_fit(fit: dict[str, Any]) -> list[PeakTemplate]:
+    return resolve_component_templates(fit["template"], fit["n_peaks"], fit.get("component_templates"))
+
+
 def template_model(
     x: np.ndarray,
     p: np.ndarray,
@@ -53,6 +67,7 @@ def template_model(
     background_order: int = 0,
     allow_scale: bool = False,
     common_scale: bool = True,
+    component_templates: list[PeakTemplate] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """Evaluate multi-component empirical-template model."""
     x = np.asarray(x, dtype=float)
@@ -78,8 +93,9 @@ def template_model(
         scales = np.ones(n_peaks)
 
     components = []
-    for mu, area, scale in zip(mus, areas, scales, strict=False):
-        components.append(template.evaluate_component(x, mu=mu, area=area, scale=scale))
+    templates = resolve_component_templates(template, n_peaks, component_templates)
+    for tpl, mu, area, scale in zip(templates, mus, areas, scales, strict=True):
+        components.append(tpl.evaluate_component(x, mu=mu, area=area, scale=scale))
     components = np.asarray(components)
 
     if background_order is None or background_order < 0:
@@ -408,8 +424,14 @@ def fit_template_region(
     min_separation: float = DEFAULT_MIN_SEPARATION_HZ,
     separation_penalty_strength: float = DEFAULT_SEPARATION_PENALTY_STRENGTH,
     mu_bounds: list[tuple[float, float]] | None = None,
+    component_templates: list[PeakTemplate] | None = None,
 ) -> dict[str, Any]:
-    """Least-squares empirical-template fit."""
+    """Joint fit with a common profile or a fixed profile for each component.
+
+    Distinct profiles require ordered, non-overlapping centroid bounds to keep
+    profile identity stable through optimization and uncertainty resampling.
+    Common scale means one shared *fractional stretch*, not equal peak widths.
+    """
     x, y = prepare_xy(x, y)
     if sigma is None:
         sigma_val = robust_sigma_from_second_difference(y)
@@ -425,6 +447,13 @@ def fit_template_region(
     min_separation = float(max(0.0, min_separation))
     mu_bounds_arr = normalize_mu_bounds(mu_bounds, n_peaks=n_peaks, xmin=float(x.min()), xmax=float(x.max()))
     ensure_mu_bounds_respect_min_separation(mu_bounds_arr, min_separation=min_separation)
+    templates = resolve_component_templates(template, n_peaks, component_templates)
+    heterogeneous = len({id(t) for t in templates}) > 1
+    if heterogeneous and mu_bounds_arr is None:
+        raise FitConfigurationError(
+            "Different component templates require ordered, non-overlapping centroid search ranges. "
+            "Draw component ranges or enter one range per component before fitting."
+        )
 
     p0, bounds, names = build_initial_params_and_bounds(
         x,
@@ -453,6 +482,7 @@ def fit_template_region(
             background_order=background_order,
             allow_scale=allow_scale,
             common_scale=common_scale,
+            component_templates=templates,
         )
         data_resid = (y_model - y) / sigma_arr
         # If component-specific search ranges were supplied, native optimizer
@@ -481,6 +511,7 @@ def fit_template_region(
         background_order=background_order,
         allow_scale=allow_scale,
         common_scale=common_scale,
+        component_templates=templates,
     )
 
     r = (y_model - y) / sigma_arr
@@ -516,6 +547,7 @@ def fit_template_region(
         "x": x,
         "y": y,
         "template": template,
+        "component_templates": templates,
         "n_peaks": n_peaks,
         "params": p_fit,
         "param_names": names,

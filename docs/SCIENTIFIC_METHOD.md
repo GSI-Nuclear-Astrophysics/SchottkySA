@@ -10,34 +10,31 @@ uncertainty model.
 
 ## 1. Problem statement
 
-Given a frequency-domain spectrum (frequency in Hz on the x-axis, an
-amplitude/linear-power quantity on the y-axis), SchottkySA fits one or more
-peaks in a user-selected region as scaled, shifted copies of a single
-**empirical peak template** -- a non-parametric line shape built directly
-from an isolated, high-signal-to-noise reference peak in the same dataset, nearby the desired target peak -- rather than assuming an analytic shape (Gaussian, Lorentzian, Voigt, ...).
-This is extremely necessary in Schottky + Isochronous Mass Spectrometry, where the true physical line shape is not well described by a simple closed form, and additionally, depending on the mass to charge ratio each peak has a slightly different shape. The further in m/q from a reference peak the peak is, the more it will deviate from the reference peak.
+SchottkySA represents each spectral component with a locally measured,
+unit-area empirical profile. Shape choice depends on the experiment and region;
+nearby or harmonic-related references can be inspected and cross-fitted before
+transfer. One profile may be shared, or each component may use its own template.
+
 ## 2. Units and conventions
 
-* Frequency axis: Hz (arbitrary absolute offset; only differences and the
-  local grid spacing matter to the algorithm).
-* Amplitude axis: unitless / linear power 
-* All areas, widths (`u`, `sigma68`, RMS width), and centroids (`mu`) are
-  reported in the same frequency units as the input x-axis (Hz for the
-  intended use case).
-* `x` must be finite, and is internally sorted with duplicate x-values
-  averaged together (`ssa.preprocessing.prepare_xy`) before any further
-  processing.
+- Frequencies, centroids, RMS widths and quantile widths use Hz.
+- The ordinate is linear power or the user's other linear signal unit.
+- Integrated area uses that ordinate unit times Hz; it is not an ion count
+  without a response calibration.
+- Template density has units of inverse Hz, with unit integral and zero COG.
+- Nonfinite pairs are removed, frequencies are sorted and duplicate ordinates
+  are averaged before construction.
 
 ## 3. Template construction
 
 1. **Preprocessing** (`ssa.preprocessing.prepare_xy`): sort by x, drop
-   non-finite points, average y for duplicate x. Usually the data is provided in such a way this is already fulfilled, just double checking. Requires >= 3 points.
+   non-finite points, average y for duplicate x. Requires at least three retained samples.
 2. **Optional edge handling** (`ssa.templates.apply_template_edge_handling`):
-   nine modes (default: `none`), from doing nothing to non-parametric
+   selectable modes (default: `none`), from doing nothing to non-parametric
    PCHIP-based tail closures to zero, half-cosine tapering, and/or constant
    edge-baseline subtraction. Closures follow only the locally observed edge shape or a
    simple taper. See the mode docstrings in `ssa.templates` for the full
-   list and when each is appropriate. Only use when the edges of a reference are contaminated.
+   list and when each is appropriate. Inspect the selected edge samples and closure; they define an analysis choice.
 3. **Optional Savitzky-Golay smoothing** of the reference peak
    (default: **off** ; sharp Schottky peak
    structures should not be washed out by default, however can be useful when interpolating or when no uncontaminated reference peak is available).
@@ -89,10 +86,8 @@ y_model(x) = background(x) + sum_k (area_k / scale_k) * pdf((x - mu_k) / scale_k
 Centroids are seeded either from user-supplied values, or by
 `scipy.signal.find_peaks` on the region (falling back to evenly spaced
 offsets around the global maximum if fewer than `n` prominent peaks are
-found). **For closely spaced ("contaminated") multi-peak regions, this
-automatic seeding can fail to resolve the components** (one can collapse
-toward a search-bound with near-zero area). The robust workflow for such
-cases is to supply explicit, ordered, non-overlapping per-component centroid
+found). For overlapping regions, automatic seeding can miss a component (one can collapse
+toward a search-bound with near-zero area). For these cases, supply explicit, ordered, non-overlapping per-component centroid
 search ranges (`mu_bounds`), which both seed the initial guess (range
 midpoint) and become hard optimizer bounds -- guaranteeing component
 identity and, if requested, a minimum separation, without relying on a soft
@@ -104,7 +99,7 @@ penalty.
 selectable robust loss (`linear` default, or `soft_l1`/`huber`/`cauchy`/
 `arctan`). The per-point weight is, unless supplied explicitly, a single
 scalar effective noise scale estimated from the second-difference statistics
-of the region (`ssa.preprocessing.robust_sigma_from_second_difference`) -- since Schottky-spectrum residuals are typically correlated, not white.
+of the region (`ssa.preprocessing.robust_sigma_from_second_difference`). Correlated residuals require the block-resampling checks described below.
 
 ## 5. Fit diagnostics
 
@@ -119,7 +114,7 @@ of the region (`ssa.preprocessing.robust_sigma_from_second_difference`) -- since
 
 ## 6. Uncertainty quantification
 
-Two independent resampling procedures, both **residual block-bootstrap**
+Two separate resampling procedures, both **residual block-bootstrap**
 based (moving-block circular resampling, block size auto-estimated from the
 residual's own autocorrelation time by default), each with an explicit
 `numpy.random.Generator` seed:
@@ -157,5 +152,49 @@ reference regions.
   calibrant validation, flow-of-information/leverage diagnostics, and
   half-life/decay-chain fitting are **not implemented anywhere in this
   package**. SchottkySA produces per-component centroids, areas, widths, and
-  uncertainties (this document); everything downstream of that is out of
-  scope for this software, and will be published separately.
+  uncertainties (this document); these observables can be passed to a separately defined downstream model.
+
+## Independent template-edge controls
+
+`left_edge_points` and `right_edge_points` override the number of measured
+samples used at each boundary; 0 inherits the common width/fraction. Counts
+are capped at half the ROI minus one sample. `left_tail_width_hz` and
+`right_tail_width_hz` independently locate zero anchors outside the ROI; 0
+inherits the common width. Positive explicit PCHIP distances end exactly at
+these anchors, including when the distance is not an integer bin spacing.
+Padding uses the same zero positions. Cosine taper uses counts inside the ROI
+and ignores outside distances. Metadata report actual counts and anchors.
+
+`local_slope_to_zero` uses an ordinary least-squares slope fitted to all
+selected edge samples, in an outward frequency coordinate s. With boundary
+height y_e, zero distance L, t=s/L and limited slope d, its outside closure is
+`y(t) = y_e*(2*t^3 - 3*t^2 + 1) + L*d*(t^3 - 2*t^2 + t)`.
+The restriction `-3*y_e/L <= d <= 0` ensures monotone nonnegative closure;
+the zero anchor has zero derivative. The original and limited slopes are
+recorded. One selected point gives zero fitted slope. This is a reproducible
+closure of an incomplete ROI, not an inferred physical tail distribution.
+
+Nominal and bootstrap templates use identical fixed edge settings. Earlier
+versions omitted edge settings in bootstrap templates; non-default edge runs
+can change when rebuilt. Default no-edge numerical behavior is unchanged.
+Residual resampling measures finite-reference scatter conditional on the
+chosen closure. Closure uncertainty requires separate plausible variations
+and is not automatically included by varying residuals.
+
+
+## Component-specific empirical profiles
+
+The multi-component model can use a different unit-area profile `T_k` for each
+component instead of repeating one template. Its area is `A_k`, its COG is
+`mu_k`, and its density is `A_k T_k((f-mu_k)/s_k)/s_k`. Ordered nonoverlapping
+COG bounds preserve component identity even when the spectral supports overlap.
+A common fitted scale is a common fractional stretch; component RMS widths are
+`s_k sigma(T_k)` and quantiles use that component's profile. Harmonic conversion
+precedes this fitted stretch. The target bootstrap refits all components jointly.
+The template-propagation ensemble uses a shared draw for repeated uses of one
+reference bank, and independent draws for distinct banks. The latter assumption
+is explicitly flagged and does not cover shared-data cross-covariances between
+different banks. Missing component banks are flagged and kept nominal.
+The resulting joint samples, rather than independent marginal errors, determine
+frequency-separation and area-ratio uncertainties. See
+[PROFILE_WORKBENCH.md](PROFILE_WORKBENCH.md) for GUI, API and replay details.

@@ -1,9 +1,4 @@
-"""Typed configuration objects for the template/fit/uncertainty pipeline.
-
-Named, typed fields (rather than plain ``dict`` payloads) make the Python
-API usable without constructing those dicts by hand. Default values are
-defined once in ``ssa.constants`` and imported here.
-"""
+"""Template, fit and resampling settings shared by the interfaces."""
 
 from __future__ import annotations
 
@@ -50,6 +45,10 @@ class TemplateBuildConfig:
     edge_mode: str = DEFAULT_EDGE_MODE
     edge_width_hz: float = DEFAULT_EDGE_WIDTH_HZ
     edge_fraction: float = DEFAULT_EDGE_FRACTION
+    left_edge_points: int = 0
+    right_edge_points: int = 0
+    left_tail_width_hz: float = 0.0
+    right_tail_width_hz: float = 0.0
 
 
 @dataclass

@@ -1,11 +1,4 @@
-"""Specific exception types for the SchottkySA scientific core.
-
-Each type subclasses the built-in exception (``ValueError``,
-``RuntimeError``) that best matches the equivalent condition, so plain
-``except ValueError`` / ``except RuntimeError`` / ``except Exception`` call
-sites keep working. These types exist to let callers (and tests) catch
-narrower, named conditions if they want to.
-"""
+"""Named input and fitting errors, retaining their built-in exception bases."""
 
 from __future__ import annotations
 

@@ -2,93 +2,48 @@
 title: Reproducibility
 ---
 
-# Reproducibility
+# Reproducing a spectral fit
 
-## Environment used to validate this code
+Template banks, target residual resampling and template propagation use explicit
+NumPy random-generator seeds. A fixed seed, input array, library version and
+call sequence define the sampling experiment. Repeated components using one
+reference bank retain shared draw indices. Profile-averaging plans are generated
+before parallel dispatch, preserving the sequence when worker counts change.
 
-* OS: Linux (x86_64).
-* Python: 3.10.4 (conda environment `analysis_env`).
-* Key dependency versions actually used for validation in that environment:
-  `numpy==2.2.6`, `scipy==1.15.3`, `PySide6==6.10.2`, `pyqtgraph==0.13.7`,
-  `pandas==2.3.3`, `odfpy==1.4.1`.
-* `pyproject.toml` declares `requires-python = ">=3.10"` with lower-bound
-  dependency pins (`numpy>=2.0`, `scipy>=1.13` -- the first releases with
-  proper mutual NumPy-2.x support); CI (`.github/workflows/ci.yml`)
-  additionally exercises Python 3.11, 3.12, and 3.13.
+Saved TOML sessions record input array keys and digest, template construction,
+component assignments, fit bounds, harmonic expressions, resampling settings
+and completed-fit checkpoints. Replay reconstructs profiles and fits using the
+same numerical core as the GUI and CLI.
 
-## Deterministic behaviour
+## Comparison tolerances
 
-Every stochastic step in the package is seeded explicitly:
+Centroids, quantile locations and raw reference centers use absolute tolerance
+`1e-5` Hz. They are not compared with a relative tolerance on the RF carrier.
+Other scalar checkpoints use relative `1e-3` and absolute `1e-6`. The public
+regression baseline has its own assertion tolerances for each numerical quantity.
+These tolerances describe numerical reproduction, not experimental accuracy.
 
-* `ssa.templates.bootstrap_template_bank(..., random_seed=12345)` (default)
-* `ssa.uncertainty.bootstrap_fit(..., rng=np.random.default_rng(seed))`
-* `ssa.uncertainty.propagate_template_uncertainty_to_target_fit(...,
-  random_seed=12345)` (default)
+An input digest mismatch is reported independently of numerical differences.
+If the file moved, supply its new path. A changed input is not silently labelled
+as the original measurement. Source-to-target profile mismatch and alternative
+edge closures remain separate analysis sensitivities.
 
-All three use `numpy.random.Generator` (the modern NumPy RNG API), so results are reproducible given the
-same seed, the same NumPy version's `Generator` algorithm (PCG64), and the
-same call sequence. The optimizer (`scipy.optimize.
-least_squares`) is deterministic given fixed inputs.
+## Public fixtures and checks
 
-## Floating-point tolerances used in tests
+`tests/data` contains constructed reference, isolated and overlapping spectra.
+The generation recipe and fixed numerical baseline are under `tests/baseline`.
+These files test array handling, normalization, component recovery, covariance
+summaries and replay. They are not measured Schottky data.
 
-Regression tests (`tests/test_regression.py`) compare against a frozen
-numeric baseline (`tests/baseline/baseline_results.json`) with `rtol=1e-3,
-atol=1e-6` rather than exact equality. Every scenario tested is fully
-deterministic (fixed seeds, no ordering dependence), so results match
-bit-for-bit on identical BLAS/LAPACK/numpy/scipy versions; across different
-environments (e.g. an unpinned `pip install` in CI vs. whatever environment
-captured the baseline), `scipy.optimize.least_squares`'s SVD-based
-Jacobian/covariance step can differ at up to the ~1e-4 relative level, and
-that noise is amplified further in fit scenarios that are themselves
-near-degenerate (e.g. the unconstrained two-peak fit, where one component's
-area sits right at a search-bound edge). The tolerance absorbs that
-cross-environment noise without masking real behavioural differences -- a
-genuine regression is expected to produce deviations many orders of
-magnitude larger than this.
-
-`ssa.session.replay_session` (and the `ssa replay` CLI command) reuse this
-same `rtol=1e-3, atol=1e-6` tolerance to compare a recomputed template/fit
-against the values recorded when a session was saved. Because fitted
-frequencies are reported as large absolute numbers (order 10^6 Hz), that
-relative tolerance is wide in absolute terms for frequency-valued fields
-(`mu_fit_Hz`, region bounds, and similar) -- wide enough that it will not
-flag a drift much smaller than the fit region itself. Fields expressed as
-shapes or differences (`raw_std`, the template quantiles, `delta_mu_prev_*`,
-`area_fit`, component widths) are centered at or near zero and so are
-checked meaningfully at this tolerance. In short: a passing `ssa replay`
-confirms the template shape, fit widths, and relative peak spacing
-reproduce; it is not a tight check on the absolute fitted frequency itself.
-
-## Test fixtures
-
-`tests/data/*.npz` are **synthetic**, generated by
-`tests/baseline/make_fixtures.py` from a deliberately non-Gaussian,
-asymmetric two-sided-Gaussian "tent" shape plus seeded Gaussian noise -- not
-real experimental Schottky data. They exist to exercise, at small size:
-
-* an isolated, high-SNR reference peak (template construction, all edge
-  modes, smoothing on/off);
-* an isolated single-peak fit target;
-* a contaminated two-peak fit target (separation comparable to the
-  template's own width), for both the unconstrained (documented failure
-  mode) and `mu_bounds`-constrained (recommended workflow) fitting paths;
-* alternate accepted NPZ key names (`f`/`y`) for the I/O key-selection logic.
-
-No confidential or raw experimental data is included in this package.
-
-## How to reproduce the regression baseline
-
-```bash
-python -m pip install -e ".[dev]"
-QT_QPA_PLATFORM=offscreen pytest tests/test_regression.py
+```sh
+QT_QPA_PLATFORM=offscreen PYQTGRAPH_QT_LIB=PySide6 pytest
+python examples/quickstart.py
+python -m build
+twine check dist/*
+python scripts/check_release.py dist/*
 ```
 
-This reads `tests/baseline/baseline_results.json`, a numeric snapshot
-captured once from the synthetic fixtures above (see
-`tests/baseline/make_fixtures.py`). Re-run it after any change to
-`src/ssa/` to confirm fitting/bootstrap numerics have not silently drifted.
-
-`QT_QPA_PLATFORM=offscreen` lets Qt/PySide6 run without a display -- needed
-for `tests/test_cli.py`'s headless `MainWindow()` construction test and for
-CI; it has no effect on any scientific computation.
+Verify an installed wheel outside the checkout. GUI tests require the optional
+GUI dependencies. The offscreen Qt setting changes display handling only.
+Record numerical-library versions with an archived analysis; a fixed seed alone
+does not identify the full environment.

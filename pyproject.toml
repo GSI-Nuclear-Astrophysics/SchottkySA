@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "SchottkySA"
-version = "1.0.1"
+dynamic = ["version"]
 description = "Empirical-template peak fitting for Schottky spectra, with a Qt GUI."
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -22,7 +22,7 @@ keywords = [
     "physics",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -62,9 +62,7 @@ dev = [
     "pre-commit>=3.7",
     "build>=1.2",
     "twine>=5.1",
-    # Unconditional: pyright checks against pythonVersion=3.10 (see below) on
-    # every CI job regardless of its actual interpreter, so it always needs
-    # this resolvable -- unlike the core dependency's python_version marker.
+    # Required by the Python 3.10 type-check target.
     "tomli>=2.0",
 ]
 
@@ -76,20 +74,31 @@ Documentation = "https://github.com/GSI-Nuclear-Astrophysics/SchottkySA/tree/mai
 [project.scripts]
 ssa = "ssa.cli:main"
 
+[tool.hatch.version]
+path = "src/ssa/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ssa"]
 
 [tool.hatch.build.targets.sdist]
-# Explicit allowlist: 
+# Keep source distributions limited to public code, fixtures and documentation.
 include = [
     "/src/ssa",
     "/tests",
     "/examples",
-    "/docs",
+    "/docs/SCIENTIFIC_METHOD.md",
+    "/docs/REPRODUCIBILITY.md",
+    "/docs/PROFILE_WORKBENCH.md",
+    "/docs/RELEASE.md",
+    "/docs/index.md",
     "/README.md",
     "/LICENSE",
     "/CITATION.cff",
     "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/CHANGELOG.md",
+    "/.zenodo.json",
+    "/scripts/check_release.py",
     "/pyproject.toml",
 ]
 
@@ -118,12 +127,7 @@ pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingImports = true
 
-# PySide6/pyqtgraph's type stubs are known-incomplete (Signal descriptors,
-# QAbstractItemView.selectionModel()/getRegion() optionality, etc.), which
-# produces a large volume of false-positive errors that have nothing to do
-# with SchottkySA's own correctness. The scientific core (everything outside
-# src/ssa/gui) is held to full strict-basic checking; the GUI layer relaxes
-# only the specific rule categories that are pure Qt-stub artefacts.
+# Limit Qt-stub relaxations to GUI modules.
 [[tool.pyright.executionEnvironments]]
 root = "src/ssa/gui"
 reportOptionalMemberAccess = false

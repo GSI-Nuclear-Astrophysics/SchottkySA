@@ -1,10 +1,4 @@
-"""Empirical peak-template construction and template-shape bootstrap.
-
-See ``docs/SCIENTIFIC_METHOD.md`` section 3 (template construction) and
-section 6 (uncertainty quantification) for the scientific rationale.
-Numerical behaviour here is part of the published fitting contract; changes
-should be made deliberately and documented there.
-"""
+"""Unit-area empirical profiles, reference bootstrap banks and edge closures."""
 
 from __future__ import annotations
 
@@ -98,6 +92,7 @@ def pchip_tail_to_zero_one_side(
     dx: float,
     tail_width_hz: float,
     monotone_envelope: bool = False,
+    exact_width: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Non-parametric tail continuation to zero using only the local edge shape.
@@ -131,9 +126,10 @@ def pchip_tail_to_zero_one_side(
         info[f"{side}_tail_model"] = "none_too_few_points"
         return np.array([]), np.array([]), info
 
-    tail_width_hz = float(max(tail_width_hz, 3.0 * dx))
+    tail_width_hz = float(tail_width_hz if exact_width else max(tail_width_hz, 3.0 * dx))
     n_extra = int(np.clip(np.ceil(tail_width_hz / dx), 3, 5000))
-    actual_width = float(n_extra * dx)
+    actual_width = tail_width_hz if exact_width else float(n_extra * dx)
+    extra_distances = np.linspace(actual_width / n_extra, actual_width, n_extra)
 
     if side == "right":
         x_seg = x[-n_edge:].copy()
@@ -144,7 +140,7 @@ def pchip_tail_to_zero_one_side(
         x_anchor = x[-1] + actual_width
         xp = np.concatenate([x_seg, [x_anchor]])
         yp = np.concatenate([y_seg, [0.0]])
-        x_extra = x[-1] + dx * np.arange(1, n_extra + 1)
+        x_extra = x[-1] + extra_distances
     else:
         x_seg = x[:n_edge].copy()
         y_seg = y[:n_edge].copy()
@@ -156,7 +152,7 @@ def pchip_tail_to_zero_one_side(
         x_anchor = x[0] - actual_width
         xp = np.concatenate([[x_anchor], x_seg])
         yp = np.concatenate([[0.0], y_seg])
-        x_extra = x[0] - dx * np.arange(n_extra, 0, -1)
+        x_extra = x[0] - extra_distances[::-1]
 
     # Ensure strictly increasing support.
     order = np.argsort(xp)
@@ -175,19 +171,68 @@ def pchip_tail_to_zero_one_side(
         # Non-parametric fallback: a direct linear closure to zero.
         if side == "right":
             edge_y = max(float(y[-1]), 0.0)
-            y_extra = edge_y * np.maximum(1.0 - np.arange(1, n_extra + 1) / n_extra, 0.0)
+            y_extra = edge_y * np.maximum(1.0 - extra_distances / actual_width, 0.0)
         else:
             edge_y = max(float(y[0]), 0.0)
-            y_extra = edge_y * np.maximum(np.arange(1, n_extra + 1) / n_extra, 0.0)
+            y_extra = edge_y * np.maximum(1.0 - extra_distances[::-1] / actual_width, 0.0)
         info[f"{side}_tail_model"] = "linear_to_zero_fallback"
 
+    y_extra[-1 if side == "right" else 0] = 0.0
+    info[f"{side}_zero_frequency_hz"] = float(x_anchor)
     info[f"{side}_tail_extra_points"] = int(n_extra)
     info[f"{side}_tail_extra_width_hz"] = actual_width
-    # Routed through ssa.preprocessing.trapz() (a thin numpy.trapezoid
-    # wrapper) rather than calling numpy directly, so every integral in this
-    # module goes through one place.
+    # Use the same quadrature convention as template normalization.
     info[f"{side}_tail_area_added"] = trapz(y_extra, x_extra) if len(x_extra) > 1 else 0.0
     return x_extra, y_extra, info
+
+
+def local_slope_tail_to_zero_one_side(
+    x: np.ndarray,
+    y: np.ndarray,
+    side: str,
+    n_edge: int,
+    dx: float,
+    width: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Estimate an outward slope from all chosen samples; close monotonically.
+
+    A cubic Hermite segment joins the observed boundary value/slope to a zero
+    anchor with zero derivative. The fitted slope is clipped to [-3*y_edge/L, 0]
+    to keep the closure nonnegative and monotone. This is a chosen ROI closure,
+    not a fit of the physical ion distribution. Observed samples are unchanged.
+    """
+    sign = -1.0 if side == "left" else 1.0
+    boundary = float(x[0] if side == "left" else x[-1])
+    indices = slice(0, n_edge) if side == "left" else slice(-n_edge, None)
+    coordinate = sign * (x[indices] - boundary)
+    yy = y[indices]
+    centered = coordinate - np.mean(coordinate)
+    denominator = float(centered @ centered)
+    slope = float(centered @ (yy - np.mean(yy)) / denominator) if denominator > 0 else 0.0
+    edge = max(float(y[0] if side == "left" else y[-1]), 0.0)
+    used_slope = float(np.clip(slope, -3.0 * edge / width, 0.0))
+    n_extra = int(np.clip(np.ceil(width / dx), 3, 5000))
+    distance = np.linspace(width / n_extra, width, n_extra)
+    t = distance / width
+    yy_extra = np.maximum((2 * t**3 - 3 * t**2 + 1) * edge + (t**3 - 2 * t**2 + t) * width * used_slope, 0.0)
+    xx_extra = boundary + sign * distance
+    yy_extra[-1] = 0.0
+    if side == "left":
+        xx_extra, yy_extra = xx_extra[::-1], yy_extra[::-1]
+    return (
+        xx_extra,
+        yy_extra,
+        {
+            f"{side}_tail_model": "local_slope_to_zero",
+            f"{side}_edge_outward_slope_fit": slope,
+            f"{side}_edge_outward_slope_used": used_slope,
+            f"{side}_edge_slope_limited": used_slope != slope,
+            f"{side}_tail_extra_points": n_extra,
+            f"{side}_tail_extra_width_hz": width,
+            f"{side}_zero_frequency_hz": boundary + sign * width,
+            f"{side}_tail_area_added": trapz(yy_extra, xx_extra),
+        },
+    )
 
 
 def apply_template_edge_handling(
@@ -196,6 +241,10 @@ def apply_template_edge_handling(
     mode: str = DEFAULT_EDGE_MODE,
     edge_width_hz: float = DEFAULT_EDGE_WIDTH_HZ,
     edge_fraction: float = DEFAULT_EDGE_FRACTION,
+    left_edge_points: int = 0,
+    right_edge_points: int = 0,
+    left_tail_width_hz: float = 0.0,
+    right_tail_width_hz: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Optionally modify a reference peak before empirical-template construction.
@@ -220,6 +269,11 @@ def apply_template_edge_handling(
     pchip_monotone_extrapolate_to_zero
         Same as pchip_extrapolate_to_zero, but first converts the edge segment
         into a monotone envelope to suppress noise oscillations near the edge.
+
+    local_slope_to_zero
+        Fit a local linear slope using every chosen edge sample, then join the
+        boundary value to the outside zero anchor with a monotone cubic Hermite
+        closure. Slopes are limited to prevent overshoot and recorded in metadata.
 
     cosine_taper_to_zero
         Multiply the first/last edge_width by a half-cosine taper so that the
@@ -247,9 +301,22 @@ def apply_template_edge_handling(
     If the non-zero edge is a baseline/contaminant, baseline subtraction plus
     padding is safer. If it is a genuine truncated physical tail and the tail is
     locally clean, pchip_extrapolate_to_zero gives a non-parametric closure.
-    Compare edge modes and treat the COG spread as a template-edge systematic.
+    Left/right sample counts and outside-ROI zero distances can be overridden
+    independently. Zero means inherit the historical common setting. Explicit
+    distances reach zero exactly at x[0]-left_tail_width_hz or
+    x[-1]+right_tail_width_hz; automatic PCHIP distances retain grid rounding.
+    Counts are capped at half the ROI minus one point and recorded in edge_info.
+    Cosine taper uses sample counts inside the ROI; outside distances apply only
+    to padding/PCHIP closure. Edge choices are fixed in the residual bootstrap;
+    compare plausible closures separately to assess edge-model sensitivity.
     """
     x, y = prepare_xy(x, y)
+    for label, value in (("left_edge_points", left_edge_points), ("right_edge_points", right_edge_points)):
+        if not np.isfinite(value) or value < 0 or int(value) != value:
+            raise TemplateConstructionError(f"{label} must be a nonnegative integer (0=auto).")
+    for label, value in (("left_tail_width_hz", left_tail_width_hz), ("right_tail_width_hz", right_tail_width_hz)):
+        if not np.isfinite(value) or value < 0:
+            raise TemplateConstructionError(f"{label} must be finite and nonnegative (0=auto).")
     mode = (mode or "none").strip().lower()
     info: dict[str, Any] = {
         "edge_mode": mode,
@@ -282,9 +349,20 @@ def apply_template_edge_handling(
     width_hz = max(width_hz, 3.0 * dx)
     info["edge_width_hz"] = width_hz
     info["edge_points_used"] = n_edge
+    max_points = max(2, len(x) // 2 - 1)
+    n_left = int(np.clip(left_edge_points, 1, max_points)) if left_edge_points else n_edge
+    n_right = int(np.clip(right_edge_points, 1, max_points)) if right_edge_points else n_edge
+    left_width = float(left_tail_width_hz or width_hz)
+    right_width = float(right_tail_width_hz or width_hz)
+    info.update(
+        left_edge_points_used=n_left,
+        right_edge_points_used=n_right,
+        left_tail_width_hz=left_width,
+        right_tail_width_hz=right_width,
+    )
 
     if "subtract_edge_baseline" in mode:
-        edge_vals = np.concatenate([y_work[:n_edge], y_work[-n_edge:]])
+        edge_vals = np.concatenate([y_work[:n_left], y_work[-n_right:]])
         baseline = float(np.nanmedian(edge_vals))
         if np.isfinite(baseline):
             y_work = y_work - baseline
@@ -292,20 +370,40 @@ def apply_template_edge_handling(
 
     if "cosine_taper" in mode:
         weights = np.ones_like(y_work, dtype=float)
-        t = np.linspace(0.0, np.pi, n_edge)
-        left = 0.5 * (1.0 - np.cos(t))
-        right = left[::-1]
-        weights[:n_edge] *= left
-        weights[-n_edge:] *= right
+        left = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_left)))
+        right = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_right)))[::-1]
+        weights[:n_left] *= left
+        weights[-n_right:] *= right
         y_work = y_work * weights
+
+    if "local_slope_to_zero" in mode:
+        left_x, left_y, left_info = local_slope_tail_to_zero_one_side(x, y_work, "left", n_left, dx, left_width)
+        right_x, right_y, right_info = local_slope_tail_to_zero_one_side(x, y_work, "right", n_right, dx, right_width)
+        info.update(left_info)
+        info.update(right_info)
+        return np.concatenate([left_x, x, right_x]), np.concatenate([left_y, y_work, right_y]), info
 
     if "pchip" in mode and "extrapolate_to_zero" in mode:
         monotone = "monotone" in mode
         left_x, left_y, left_info = pchip_tail_to_zero_one_side(
-            x, y_work, "left", n_edge, dx, tail_width_hz=width_hz, monotone_envelope=monotone
+            x,
+            y_work,
+            "left",
+            n_left,
+            dx,
+            tail_width_hz=left_width,
+            monotone_envelope=monotone,
+            exact_width=left_tail_width_hz > 0,
         )
         right_x, right_y, right_info = pchip_tail_to_zero_one_side(
-            x, y_work, "right", n_edge, dx, tail_width_hz=width_hz, monotone_envelope=monotone
+            x,
+            y_work,
+            "right",
+            n_right,
+            dx,
+            tail_width_hz=right_width,
+            monotone_envelope=monotone,
+            exact_width=right_tail_width_hz > 0,
         )
         info.update(left_info)
         info.update(right_info)
@@ -325,10 +423,24 @@ def apply_template_edge_handling(
     # use the non-parametric PCHIP closure rather than an analytic exponential.
     if "extrapolate_to_zero" in mode:
         left_x, left_y, left_info = pchip_tail_to_zero_one_side(
-            x, y_work, "left", n_edge, dx, tail_width_hz=width_hz, monotone_envelope=False
+            x,
+            y_work,
+            "left",
+            n_left,
+            dx,
+            tail_width_hz=left_width,
+            monotone_envelope=False,
+            exact_width=left_tail_width_hz > 0,
         )
         right_x, right_y, right_info = pchip_tail_to_zero_one_side(
-            x, y_work, "right", n_edge, dx, tail_width_hz=width_hz, monotone_envelope=False
+            x,
+            y_work,
+            "right",
+            n_right,
+            dx,
+            tail_width_hz=right_width,
+            monotone_envelope=False,
+            exact_width=right_tail_width_hz > 0,
         )
         info.update(left_info)
         info.update(right_info)
@@ -347,7 +459,10 @@ def apply_template_edge_handling(
     if "pad_to_zero" in mode:
         anchor_width = width_hz if width_hz > 0 else 3.0 * dx
         anchor_width = max(anchor_width, dx)
-        x_ext = np.concatenate([[x[0] - anchor_width], x, [x[-1] + anchor_width]])
+        left_anchor = float(x[0] - (left_tail_width_hz or anchor_width))
+        right_anchor = float(x[-1] + (right_tail_width_hz or anchor_width))
+        x_ext = np.concatenate([[left_anchor], x, [right_anchor]])
+        info.update(left_zero_frequency_hz=left_anchor, right_zero_frequency_hz=right_anchor)
         y_ext = np.concatenate([[0.0], y_work, [0.0]])
         info["zero_anchor_width_hz"] = float(anchor_width)
         return x_ext, y_ext, info
@@ -367,6 +482,10 @@ def build_peak_template(
     edge_mode: str = DEFAULT_EDGE_MODE,
     edge_width_hz: float = DEFAULT_EDGE_WIDTH_HZ,
     edge_fraction: float = DEFAULT_EDGE_FRACTION,
+    left_edge_points: int = 0,
+    right_edge_points: int = 0,
+    left_tail_width_hz: float = 0.0,
+    right_tail_width_hz: float = 0.0,
 ) -> PeakTemplate:
     """
     Build a normalized, COG-centered empirical peak template.
@@ -387,11 +506,7 @@ def build_peak_template(
         if sg_window >= len(y_work):
             sg_window = make_odd(len(y_work) - 2, minimum=5)
         y_work = savgol_filter(y_work, window_length=sg_window, polyorder=min(sg_poly, sg_window - 2))
-    # Normalize to a concrete np.ndarray[float64]: savgol_filter's return type
-    # varies across scipy stub versions (e.g. scipy-stubs' more specific
-    # array-shape generics), which can otherwise fail static type-checking
-    # against apply_template_edge_handling's plain ndarray parameter. No
-    # numerical effect -- savgol_filter already returns a float64 ndarray.
+    # Keep the array contract consistent across SciPy versions.
     y_work = np.asarray(y_work, dtype=float)
 
     x, y_work, edge_info = apply_template_edge_handling(
@@ -400,6 +515,10 @@ def build_peak_template(
         mode=edge_mode,
         edge_width_hz=edge_width_hz,
         edge_fraction=edge_fraction,
+        left_edge_points=left_edge_points,
+        right_edge_points=right_edge_points,
+        left_tail_width_hz=left_tail_width_hz,
+        right_tail_width_hz=right_tail_width_hz,
     )
 
     y_pos = np.clip(y_work, 0.0, None) if clip_negative else y_work - min(0.0, float(np.nanmin(y_work)))
@@ -422,12 +541,21 @@ def build_peak_template(
         raise TemplateConstructionError("Invalid frequency grid spacing.")
 
     du = dx / float(max(1, int(resample_factor)))
-    u = np.arange(u_raw.min(), u_raw.max() + 0.5 * du, du)
+    if (left_tail_width_hz > 0 or right_tail_width_hz > 0) and "left_zero_frequency_hz" in edge_info:
+        # Keep both explicit anchors in the resampled support, including
+        # non-integral bin distances. No change to legacy automatic grids.
+        n_intervals = int(np.ceil(float(np.ptp(u_raw)) / du))
+        u = np.linspace(u_raw.min(), u_raw.max(), n_intervals + 1)
+    else:
+        u = np.arange(u_raw.min(), u_raw.max() + 0.5 * du, du)
 
     interp = PchipInterpolator(u_raw, pdf_raw, extrapolate=False)
     pdf = interp(u)
     pdf = np.nan_to_num(pdf, nan=0.0, posinf=0.0, neginf=0.0)
     pdf = np.clip(pdf, 0.0, None)
+    if (left_tail_width_hz > 0 or right_tail_width_hz > 0) and "left_zero_frequency_hz" in edge_info:
+        # Enforce exact endpoint zeros after floating-point interpolation.
+        pdf[0] = pdf[-1] = 0.0
 
     pdf_area = trapz(pdf, u)
     if pdf_area <= 0:
@@ -507,6 +635,10 @@ def bootstrap_template_bank(
     edge_mode: str = DEFAULT_EDGE_MODE,
     edge_width_hz: float = DEFAULT_EDGE_WIDTH_HZ,
     edge_fraction: float = DEFAULT_EDGE_FRACTION,
+    left_edge_points: int = 0,
+    right_edge_points: int = 0,
+    left_tail_width_hz: float = 0.0,
+    right_tail_width_hz: float = 0.0,
 ) -> dict[str, Any]:
     """Build a nominal template plus bootstrap template bank."""
     rng = np.random.default_rng(random_seed)
@@ -523,6 +655,10 @@ def bootstrap_template_bank(
         edge_mode=edge_mode,
         edge_width_hz=edge_width_hz,
         edge_fraction=edge_fraction,
+        left_edge_points=left_edge_points,
+        right_edge_points=right_edge_points,
+        left_tail_width_hz=left_tail_width_hz,
+        right_tail_width_hz=right_tail_width_hz,
     )
 
     # Residual model uses the SG window, even if the nominal template is unsmoothed.
@@ -554,6 +690,13 @@ def bootstrap_template_bank(
                 sg_window=None,
                 sg_poly=sg_poly,
                 resample_factor=resample_factor,
+                edge_mode=edge_mode,
+                edge_width_hz=edge_width_hz,
+                edge_fraction=edge_fraction,
+                left_edge_points=left_edge_points,
+                right_edge_points=right_edge_points,
+                left_tail_width_hz=left_tail_width_hz,
+                right_tail_width_hz=right_tail_width_hz,
             )
             templates.append(tpl)
             raw_cog.append(tpl.raw_cog)
