@@ -1,6 +1,6 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21906687.svg)](https://doi.org/10.5281/zenodo.21906687)
 
-# SchottkySA — Schottky Shape Analyzer
+# SchottkySA — Schottky spectra Shape Analyzer
 
 SchottkySA fits spectral components with empirical line shapes measured in
 the same experiment. It returns centroids, integrated areas, widths and joint
