@@ -14,6 +14,9 @@ venv/
 .env
 *.log
 
+# Internal implementation notes are not part of the public source tree.
+/docs/superpowers/
+
 # Editors / OS
 .DS_Store
 .idea/

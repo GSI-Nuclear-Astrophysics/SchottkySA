@@ -1,0 +1,13 @@
+/.git* export-ignore
+/.github/ export-ignore
+/.pre-commit-config.yaml export-ignore
+/.claude/ export-ignore
+/.superpowers/ export-ignore
+/docs/superpowers/ export-ignore
+/notebooks/ export-ignore
+/validation_private/ export-ignore
+*.ipynb export-ignore
+*.ods export-ignore
+*.xlsx export-ignore
+/build/ export-ignore
+/dist/ export-ignore

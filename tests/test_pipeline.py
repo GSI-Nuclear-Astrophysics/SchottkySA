@@ -16,8 +16,8 @@ from ssa.pipeline import KNOWN_LIMITATIONS, build_run_summary, build_template_ba
 
 def test_build_template_bank_matches_direct_call(baseline):
     f_ref, y_ref = load_xy("synthetic_reference_peak.npz", "frequency", "amplitude")
-    bank = build_template_bank(f_ref, y_ref, TemplateBuildConfig())
     expected = baseline["template_bootstrap_bank"]
+    bank = build_template_bank(f_ref, y_ref, TemplateBuildConfig(n_template_boot=expected["n_templates"]))
     assert bank["summary"]["n_templates"] == expected["n_templates"]
     assert bank["residual_model"]["block_size"] == expected["block_size"]
     assert_close(bank["summary"]["raw_cog"], expected["summary_raw_cog"])
@@ -25,10 +25,16 @@ def test_build_template_bank_matches_direct_call(baseline):
 
 def test_run_fit_with_uncertainty_matches_direct_call(baseline):
     f_ref, y_ref = load_xy("synthetic_reference_peak.npz", "frequency", "amplitude")
-    bank = build_template_bank(f_ref, y_ref, TemplateBuildConfig())
+    bank = build_template_bank(
+        f_ref, y_ref, TemplateBuildConfig(n_template_boot=baseline["template_bootstrap_bank"]["n_templates"])
+    )
 
     f_single, y_single = load_xy("synthetic_single_peak.npz", "frequency", "amplitude")
-    unc_config = UncertaintyConfig(n_boot=1000, random_seed=12345)
+    unc_config = UncertaintyConfig(
+        n_boot=1000,
+        n_template_prop=baseline["fit_single_peak_template_propagation"]["n_valid"],
+        random_seed=12345,
+    )
     result = run_fit_with_uncertainty(
         f_single, y_single, bank["template_nominal"], bank["templates"], FitConfig(), unc_config
     )

@@ -42,6 +42,10 @@ def _load_reference_npz(win) -> None:
     win.amplitude = y
     win.data_curve.setData(f, y)
     win.region.setRegion([float(f.min()), float(f.max())])
+    # Worker tests use explicit small runs; fresh-window tests check the defaults.
+    win.template_boot_spin.setValue(30)
+    win.n_boot_spin.setValue(50)
+    win.tpl_prop_spin.setValue(30)
 
 
 def test_template_config_from_widgets_matches_defaults(main_window):
@@ -64,7 +68,7 @@ def test_build_template_stores_config_on_entry(main_window):
     main_window.worker.wait()
     QtWidgets.QApplication.processEvents()
     assert len(main_window.templates) == 1
-    assert main_window.templates[0]["config"] == TemplateBuildConfig(name="reference_peak")
+    assert main_window.templates[0]["config"] == TemplateBuildConfig(name="reference_peak", n_template_boot=30)
 
 
 def test_store_current_fit_records_fit_and_uncertainty_config(main_window):
@@ -86,7 +90,7 @@ def test_store_current_fit_records_fit_and_uncertainty_config(main_window):
     assert len(main_window.fit_records) == 1
     record = main_window.fit_records[0]
     assert record["fit_config"] == FitConfig(n_peaks=1)
-    assert record["uncertainty_config"] == UncertaintyConfig()
+    assert record["uncertainty_config"] == UncertaintyConfig(n_boot=50, n_template_prop=30)
     assert record["template_index"] == 0
     lo, hi = record["region_hz"]
     assert lo < hi
