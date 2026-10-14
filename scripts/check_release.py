@@ -9,12 +9,6 @@ from pathlib import PurePosixPath
 PRIVATE_PARTS = {
     ".git",
     ".claude",
-    ".superpowers",
-    "superpowers",
-    "notebooks",
-    "paper",
-    "validation_private",
-    "validation_private.example",
     "__pycache__",
 }
 PRIVATE_SUFFIXES = {".ipynb", ".ods", ".xlsx", ".pyc", ".log"}
